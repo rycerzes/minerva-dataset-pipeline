@@ -4,7 +4,7 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel
-from typing import TypeVar, Iterable, Optional, Any
+from typing import TypeVar, Iterable, Any
 
 
 T = TypeVar("T", bound=BaseModel)
