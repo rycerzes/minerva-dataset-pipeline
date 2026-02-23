@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import httpx
 from pydantic import BaseModel, Field
 from typing import Optional
+import sys
+from pathlib import Path
 
-from ..utils import model_to_parquet
+try:
+    from ..utils import download, model_to_parquet
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from utils import download, model_to_parquet
 
 
 LICENSEDB_BASE_URL = "https://scancode-licensedb.aboutcode.org"
@@ -19,7 +24,7 @@ class LicenseIndexEntry(BaseModel):
     other_spdx_license_keys: list[str] = Field(default_factory=list)
     is_exception: bool = False
     is_deprecated: bool = False
-    json: str
+    json_file: str = Field(alias="json")
     yaml: str
     html: str
     license: str
@@ -59,33 +64,14 @@ class LicenseData(BaseModel):
 class ScanCodeFetcher:
     def __init__(self, base_url: str = LICENSEDB_BASE_URL):
         self.base_url = base_url
-        self._client: Optional[httpx.Client] = None
         self._index: Optional[list[LicenseIndexEntry]] = None
-
-    @property
-    def client(self) -> httpx.Client:
-        if self._client is None:
-            self._client = httpx.Client(timeout=60.0)
-        return self._client
-
-    def close(self) -> None:
-        if self._client:
-            self._client.close()
-            self._client = None
-
-    def __enter__(self) -> "ScanCodeFetcher":
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
 
     def fetch_index(self, force: bool = False) -> list[LicenseIndexEntry]:
         if self._index is not None and not force:
             return self._index
 
         url = f"{self.base_url}/index.json"
-        response = self.client.get(url)
-        response.raise_for_status()
+        response = download(url)
 
         data = response.json()
         self._index = [LicenseIndexEntry.model_validate(entry) for entry in data]
@@ -93,13 +79,12 @@ class ScanCodeFetcher:
 
     def fetch_license_details(self, license_json_path: str) -> LicenseDetails:
         url = f"{self.base_url}/{license_json_path}"
-        response = self.client.get(url)
-        response.raise_for_status()
+        response = download(url)
 
         data = response.json()
         return LicenseDetails.model_validate(data)
 
-    def fetch_all_licenses(
+    def fetch_all(
         self,
         include_exceptions: bool = False,
         include_deprecated: bool = False,
@@ -115,8 +100,8 @@ class ScanCodeFetcher:
                 continue
 
             try:
-                details = self.fetch_license_details(entry.json)
-            except httpx.HTTPError:
+                details = self.fetch_license_details(entry.json_file)
+            except Exception:
                 continue
 
             license_data = LicenseData(
@@ -128,13 +113,13 @@ class ScanCodeFetcher:
                 is_exception=entry.is_exception,
                 is_deprecated=entry.is_deprecated,
                 license_text=details.text,
-                source_url=f"{self.base_url}/{entry.json}",
+                source_url=f"{self.base_url}/{entry.json_file}",
             )
             licenses.append(license_data)
 
         return licenses
 
-    def iter_licenses(
+    def iter_all(
         self,
         include_exceptions: bool = False,
         include_deprecated: bool = False,
@@ -148,8 +133,8 @@ class ScanCodeFetcher:
                 continue
 
             try:
-                details = self.fetch_license_details(entry.json)
-            except httpx.HTTPError:
+                details = self.fetch_license_details(entry.json_file)
+            except Exception:
                 continue
 
             yield LicenseData(
@@ -161,27 +146,30 @@ class ScanCodeFetcher:
                 is_exception=entry.is_exception,
                 is_deprecated=entry.is_deprecated,
                 license_text=details.text,
-                source_url=f"{self.base_url}/{entry.json}",
+                source_url=f"{self.base_url}/{entry.json_file}",
             )
 
 
 def fetch_scancode_licenses(
+    base_url: str = LICENSEDB_BASE_URL,
     include_exceptions: bool = False,
     include_deprecated: bool = False,
 ) -> list[LicenseData]:
-    with ScanCodeFetcher() as fetcher:
-        return fetcher.fetch_all_licenses(
-            include_exceptions=include_exceptions,
-            include_deprecated=include_deprecated,
-        )
+    fetcher = ScanCodeFetcher(base_url)
+    return fetcher.fetch_all(
+        include_exceptions=include_exceptions,
+        include_deprecated=include_deprecated,
+    )
 
 
 def fetch_and_save_parquet(
     output_path: str,
+    base_url: str = LICENSEDB_BASE_URL,
     include_exceptions: bool = False,
     include_deprecated: bool = False,
 ) -> int:
     licenses = fetch_scancode_licenses(
+        base_url=base_url,
         include_exceptions=include_exceptions,
         include_deprecated=include_deprecated,
     )
@@ -190,9 +178,9 @@ def fetch_and_save_parquet(
 
 
 if __name__ == "__main__":
-    with ScanCodeFetcher() as fetcher:
-        index = fetcher.fetch_index()
-        print(f"Fetched {len(index)} license entries from ScanCode LicenseDB")
+    fetcher = ScanCodeFetcher()
+    index = fetcher.fetch_index()
+    print(f"Fetched {len(index)} license entries from ScanCode LicenseDB")
 
-        sample = fetcher.fetch_license_details(index[0].json)
-        print(f"Sample license: {sample.short_name}")
+    sample = fetcher.fetch_license_details(index[0].json_file)
+    print(f"Sample license: {sample.short_name}")
