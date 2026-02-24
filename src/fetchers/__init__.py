@@ -13,7 +13,10 @@ from .fossology import (
     fetch_and_save_parquet as fetch_fossology_parquet,
 )
 
-from ..utils import model_to_parquet, iter_to_parquet, read_parquet
+try:
+    from ..utils import model_to_parquet, iter_to_parquet, read_parquet
+except ImportError:
+    pass
 
 __all__ = [
     "ScanCodeFetcher",

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 import sys
 from pathlib import Path
+import httpx
 
 try:
     from ..utils import download, model_to_parquet
@@ -66,12 +67,15 @@ class ScanCodeFetcher:
         self.base_url = base_url
         self._index: Optional[list[LicenseIndexEntry]] = None
 
+        limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        self._client = httpx.Client(timeout=60.0, limits=limits)
+
     def fetch_index(self, force: bool = False) -> list[LicenseIndexEntry]:
         if self._index is not None and not force:
             return self._index
 
         url = f"{self.base_url}/index.json"
-        response = download(url)
+        response = download(url, client=self._client)
 
         data = response.json()
         self._index = [LicenseIndexEntry.model_validate(entry) for entry in data]
@@ -79,7 +83,7 @@ class ScanCodeFetcher:
 
     def fetch_license_details(self, license_json_path: str) -> LicenseDetails:
         url = f"{self.base_url}/{license_json_path}"
-        response = download(url)
+        response = download(url, client=self._client)
 
         data = response.json()
         return LicenseDetails.model_validate(data)
@@ -101,7 +105,11 @@ class ScanCodeFetcher:
 
             try:
                 details = self.fetch_license_details(entry.json_file)
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"Warning: Failed to fetch {entry.json_file}: {exc}",
+                    file=sys.stderr,
+                )
                 continue
 
             license_data = LicenseData(
@@ -134,7 +142,11 @@ class ScanCodeFetcher:
 
             try:
                 details = self.fetch_license_details(entry.json_file)
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"Warning: Failed to fetch {entry.json_file}: {exc}",
+                    file=sys.stderr,
+                )
                 continue
 
             yield LicenseData(
