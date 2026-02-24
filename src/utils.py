@@ -4,20 +4,27 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel
-from typing import TypeVar, Iterable, Any
+from typing import TypeVar, Iterable, Any, Optional
 
 
 T = TypeVar("T", bound=BaseModel)
 
 
-def download(url: str, timeout: float = 60.0) -> httpx.Response:
-    client = httpx.Client(timeout=timeout)
+def download(
+    url: str, timeout: float = 60.0, client: Optional[httpx.Client] = None
+) -> httpx.Response:
+    if client is not None:
+        response = client.get(url, timeout=timeout)
+        response.raise_for_status()
+        return response
+
+    local_client = httpx.Client(timeout=timeout)
     try:
-        response = client.get(url)
+        response = local_client.get(url)
         response.raise_for_status()
         return response
     finally:
-        client.close()
+        local_client.close()
 
 
 def save(content: Any, output_path: str) -> None:
