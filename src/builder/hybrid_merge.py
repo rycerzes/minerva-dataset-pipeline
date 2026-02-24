@@ -14,7 +14,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from fetchers.scancode import LicenseData as ScanCodeLicense
     from fetchers.fossology import FossologyLicense
-    from utils import model_to_parquet, iter_to_parquet
+    from utils import model_to_parquet, iter_to_parquet  # noqa: F401
 
 
 class DataSource(str, Enum):
@@ -29,7 +29,7 @@ class DatasetEntry(BaseModel):
     short_name: str
     full_name: str
     category: str
-    license_text: str
+    license_text: Optional[str] = None
     source: DataSource
     source_url: Optional[str] = None
     spdx_license_key: Optional[str] = None
@@ -43,13 +43,9 @@ class HybridMerger:
         scancode_licenses: list[ScanCodeLicense],
         fossology_licenses: list[FossologyLicense],
     ):
-        self.scancode_licenses = {
-            lic.license_key: lic for lic in scancode_licenses if lic.license_text
-        }
+        self.scancode_licenses = {lic.license_key: lic for lic in scancode_licenses}
         self.fossology_licenses = {
-            lic.rf_shortname: lic
-            for lic in fossology_licenses
-            if lic.rf_shortname and lic.rf_text
+            lic.rf_shortname: lic for lic in fossology_licenses if lic.rf_shortname
         }
 
     def _normalize_key(self, key: str) -> str:
@@ -66,7 +62,7 @@ class HybridMerger:
                 short_name=sc.short_name or key,
                 full_name=sc.name or sc.short_name or key,
                 category=sc.category or "unknown",
-                license_text=sc.license_text or "",
+                license_text=sc.license_text,
                 source=DataSource.SCANCODE,
                 source_url=sc.source_url,
                 spdx_license_key=sc.spdx_license_key,
@@ -77,8 +73,6 @@ class HybridMerger:
             added_keys.add(normalized)
 
         for key, fo in self.fossology_licenses.items():
-            if not fo.rf_text:
-                continue
             normalized = self._normalize_key(key)
             if normalized in added_keys:
                 continue
@@ -88,7 +82,7 @@ class HybridMerger:
                 short_name=fo.rf_shortname or key,
                 full_name=fo.rf_fullname or fo.rf_shortname or key,
                 category=fo.rf_copyleft or "unknown",
-                license_text=fo.rf_text or "",
+                license_text=fo.rf_text,
                 source=DataSource.FOSSOLOGY,
                 source_url=fo.rf_url,
                 spdx_license_key=None,

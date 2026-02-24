@@ -18,8 +18,8 @@ def run_pipeline(
     output_path: str = "hybrid_dataset.parquet",
     scancode_base_url: str = "https://scancode-licensedb.aboutcode.org",
     fossology_base_url: str = "https://raw.githubusercontent.com/fossology/fossology/master/install/db/licenseRef.json",
-    include_exceptions: bool = False,
-    include_deprecated: bool = False,
+    include_exceptions: bool = True,
+    include_deprecated: bool = True,
     verbose: bool = False,
 ) -> dict:
     print("=" * 60)
@@ -94,12 +94,14 @@ def main():
     )
     parser.add_argument(
         "--include-exceptions",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Include license exceptions in the dataset",
     )
     parser.add_argument(
         "--include-deprecated",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Include deprecated licenses in the dataset",
     )
     parser.add_argument(
