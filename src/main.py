@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -14,6 +15,26 @@ from builder.hybrid_merge import (
 )
 from builder.augmented_merge import AugmentedMerger, AugmentedMergerConfig
 from exporter.dataset_export import DatasetExporter, ExportConfig
+from augmentation.legal_structure_splitter import LegalStructureSplitter
+from augmentation.llm_synthetic import SurgicalLLMInjector
+from augmentation.hard_negative_generator import HardNegativeGenerator
+from augmentation.class_balancing import NirjasClassBalancer
+
+logger = logging.getLogger(__name__)
+
+
+def _llm_available() -> bool:
+    """Return True if a .env with LLM config exists and is parseable."""
+    env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        return False
+    try:
+        from config import LLMConfig
+
+        LLMConfig(env_path=env_path)
+        return True
+    except Exception:
+        return False
 
 
 def run_pipeline(
@@ -24,13 +45,16 @@ def run_pipeline(
     include_deprecated: bool = True,
     export_dir: str = "output",
     train_split_ratio: float = 0.8,
+    enable_llm: bool = True,
     verbose: bool = False,
 ) -> dict:
+    total_steps = 8 if enable_llm else 6
+
     print("=" * 60)
     print("Minerva Dataset Pipeline")
     print("=" * 60)
 
-    print("\n[1/5] Fetching ScanCode LicenseDB...")
+    print(f"\n[1/{total_steps}] Fetching ScanCode LicenseDB...")
     scancode_fetcher = ScanCodeFetcher(base_url=scancode_base_url)
     scancode_licenses = scancode_fetcher.fetch_all(
         include_exceptions=include_exceptions,
@@ -40,14 +64,14 @@ def run_pipeline(
     scancode_with_text = sum(1 for lic in scancode_licenses if lic.license_text)
     print(f"  Fetched {scancode_count} licenses ({scancode_with_text} with text)")
 
-    print("\n[2/5] Fetching FOSSology licenseRef.json...")
+    print(f"\n[2/{total_steps}] Fetching FOSSology licenseRef.json...")
     fossology_fetcher = FossologyFetcher(base_url=fossology_base_url)
     fossology_licenses = fossology_fetcher.fetch_all()
     fossology_count = len(fossology_licenses)
     fossology_with_text = sum(1 for lic in fossology_licenses if lic.rf_text)
     print(f"  Fetched {fossology_count} licenses ({fossology_with_text} with text)")
 
-    print("\n[3/5] Merging datasets...")
+    print(f"\n[3/{total_steps}] Merging datasets...")
     merger = HybridMerger(scancode_licenses, fossology_licenses)
     dataset = merger.merge()
     stats = merger.get_statistics(dataset)
@@ -57,16 +81,96 @@ def run_pipeline(
     print(f"  FOSSology legacy: {stats['fossology_legacy']}")
     print(f"  Exceptions: {stats['exceptions']}")
 
-    print(f"\nSaving hybrid dataset to {output_path}...")
+    print(f"\n  Saving hybrid dataset to {output_path}...")
     count = save_hybrid_dataset(dataset, output_path)
     print(f"  Saved {count} entries")
 
-    print("\n[4/5] Running augmented merge...")
+    step = 4
+    print(f"\n[{step}/{total_steps}] Splitting license texts (sliding window)...")
+    splitter = LegalStructureSplitter()
+    fragments = splitter.split_dataset(dataset)
+    frag_stats = splitter.get_fragment_statistics(fragments)
+    print(f"  Total fragments:             {frag_stats['total_fragments']:,}")
+    print(f"  Licenses with fragments:     {frag_stats['licenses_with_fragments']:,}")
+    print(
+        f"  Avg fragments/license:       {frag_stats['avg_fragments_per_license']:.1f}"
+    )
+    print(
+        f"  Fragments with placeholders: {frag_stats['fragments_with_placeholders']:,}"
+    )
+
+    augmented_fragments = []
+    hard_negatives = []
+
+    if enable_llm:
+        if not _llm_available():
+            print(
+                "\n  WARNING: --enable-llm is set but no valid .env found. "
+                "Skipping LLM augmentation stages."
+            )
+            enable_llm = False
+
+    if enable_llm:
+        from config import LLMConfig
+
+        llm_config = LLMConfig()
+
+        step = 5
+        fragments_with_ph = [f for f in fragments if f.placeholders]
+        print(
+            f"\n[{step}/{total_steps}] Surgical LLM injection "
+            f"({len(fragments_with_ph)} fragments with placeholders)..."
+        )
+        injector = SurgicalLLMInjector(config=llm_config)
+        augmented_fragments = injector.augment_dataset(fragments)
+        n_actually_augmented = sum(
+            1
+            for a in augmented_fragments
+            if a.augmented_text.strip() != a.original_fragment.fragment_text.strip()
+        )
+        print(f"  Augmented fragments:  {n_actually_augmented:,}")
+        print(
+            f"  Pass-through (no ph): {len(augmented_fragments) - n_actually_augmented:,}"
+        )
+
+        step = 6
+        license_keys = [e.license_key for e in dataset if e.license_text]
+        print(
+            f"\n[{step}/{total_steps}] Generating hard negatives "
+            f"for {len(license_keys)} licenses..."
+        )
+        neg_generator = HardNegativeGenerator(config=llm_config)
+        hard_negatives = neg_generator.generate_batch(license_keys)
+        neg_stats = neg_generator.get_statistics(hard_negatives)
+        print(f"  Total hard negatives: {neg_stats['total']:,}")
+        for ntype, ncount in sorted(neg_stats.get("by_type", {}).items()):
+            print(f"    {ntype:25s} {ncount:,}")
+
+    step = total_steps - 1
+    print(f"\n[{step}/{total_steps}] Balancing Nirjas classes & augmented merge...")
+
+    # Nirjas class balancing
+    balancer = NirjasClassBalancer()
+    nirjas_balanced = balancer.balance(
+        fragments=fragments,
+        augmented=augmented_fragments,
+        hard_negatives=hard_negatives,
+    )
+    balancer.print_statistics(nirjas_balanced)
+
+    # Augmented merge (Atarashi stratification + Nirjas conversion)
     aug_merger = AugmentedMerger(AugmentedMergerConfig())
-    atarashi_samples, nirjas_samples = aug_merger.merge(base_dataset=dataset)
+    atarashi_samples, nirjas_samples = aug_merger.merge(
+        base_dataset=dataset,
+        fragments=fragments,
+        augmented_fragments=augmented_fragments,
+        hard_negatives=hard_negatives,
+        nirjas_balanced=nirjas_balanced,
+    )
     aug_merger.print_statistics(atarashi_samples, nirjas_samples)
 
-    print("\n[5/5] Exporting HF datasets...")
+    step = total_steps
+    print(f"\n[{step}/{total_steps}] Exporting HF datasets...")
     export_config = ExportConfig(
         output_dir=export_dir,
         train_split_ratio=train_split_ratio,
@@ -90,6 +194,11 @@ def run_pipeline(
         "output_path": output_path,
         "entries_written": count,
         "statistics": stats,
+        "fragments_total": frag_stats["total_fragments"],
+        "fragments_with_placeholders": frag_stats["fragments_with_placeholders"],
+        "augmented_fragments": len(augmented_fragments),
+        "hard_negatives": len(hard_negatives),
+        "nirjas_balanced": len(nirjas_balanced),
         "atarashi_samples": len(atarashi_samples),
         "nirjas_samples": len(nirjas_samples),
         "export_result": export_result.model_dump(),
@@ -142,6 +251,17 @@ def main():
         default=0.8,
         help="Fraction of data for the train split (default: 0.8)",
     )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip LLM-dependent stages (surgical injection & hard negatives). "
+            "Useful for offline/CI runs.  The pipeline will still produce "
+            "sliding-window fragments and export datasets, but without "
+            "synthetic augmentation or Nirjas hard negatives."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -153,6 +273,7 @@ def main():
         include_deprecated=args.include_deprecated,
         export_dir=args.export_dir,
         train_split_ratio=args.train_split_ratio,
+        enable_llm=not args.no_llm,
         verbose=args.verbose,
     )
 
