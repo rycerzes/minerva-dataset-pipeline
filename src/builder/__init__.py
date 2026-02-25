@@ -5,6 +5,13 @@ from .hybrid_merge import (
     create_hybrid_dataset,
     save_hybrid_dataset,
 )
+from .augmented_merge import (
+    AugmentedMerger,
+    AugmentedMergerConfig,
+    AtarashiSample,
+    NirjasSample,
+    augmented_merge,
+)
 
 __all__ = [
     "HybridMerger",
@@ -12,4 +19,9 @@ __all__ = [
     "DataSource",
     "create_hybrid_dataset",
     "save_hybrid_dataset",
+    "AugmentedMerger",
+    "AugmentedMergerConfig",
+    "AtarashiSample",
+    "NirjasSample",
+    "augmented_merge",
 ]

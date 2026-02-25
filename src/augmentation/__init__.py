@@ -16,6 +16,12 @@ from .hard_negative_generator import (
     HardNegativeGenerator,
     generate_hard_negatives,
 )
+from .class_balancing import (
+    BalancedSample,
+    BalancingConfig,
+    NirjasClassBalancer,
+    balance_nirjas_dataset,
+)
 
 __all__ = [
     "LegalStructureSplitter",
@@ -30,4 +36,8 @@ __all__ = [
     "HardNegativeGeneratorError",
     "HardNegativeGenerator",
     "generate_hard_negatives",
+    "BalancedSample",
+    "BalancingConfig",
+    "NirjasClassBalancer",
+    "balance_nirjas_dataset",
 ]
