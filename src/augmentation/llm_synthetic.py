@@ -21,6 +21,8 @@ except ImportError:
     )
     from config import LLMConfig, RateLimiter
 
+from .llm_cache import LLMCache
+
 
 class PlaceholderContext(BaseModel):
     model_config = {"protected_namespaces": ()}
@@ -58,10 +60,17 @@ class SurgicalLLMInjector:
     MAX_RETRIES: int = 3
     RETRY_BACKOFF_BASE: float = 2.0
 
-    def __init__(self, config: Optional[LLMConfig] = None):
+    CACHE_NAMESPACE: str = "surgical_injection"
+
+    def __init__(
+        self,
+        config: Optional[LLMConfig] = None,
+        cache: Optional[LLMCache] = None,
+    ):
         self.config = config or LLMConfig()
         self._rate_limiter = RateLimiter(self.config.rpm)
         self._llm_client = None
+        self._cache = cache
 
     def _get_llm_client(self):
         if self._llm_client is None:
@@ -192,6 +201,14 @@ Output ONLY the augmented text, nothing else. Do not add explanations or comment
             f"LLM API call failed after {self.MAX_RETRIES} attempts: {last_error}"
         ) from last_error
 
+    @staticmethod
+    def _cache_key(fragment: SplitFragment) -> str:
+        """Deterministic cache key for a fragment."""
+        import hashlib
+
+        blob = f"{fragment.license_key}|{fragment.fragment_index}|{fragment.fragment_text}"
+        return hashlib.sha256(blob.encode()).hexdigest()[:24]
+
     def augment_fragment(self, fragment: SplitFragment) -> AugmentedFragment:
         if not fragment.placeholders:
             return AugmentedFragment(
@@ -213,17 +230,30 @@ Output ONLY the augmented text, nothing else. Do not add explanations or comment
                 llm_model_used=self.config.model,
             )
 
+        # --- Cache check ---
+        cache_key = self._cache_key(fragment)
+        if self._cache is not None:
+            cached = self._cache.get(self.CACHE_NAMESPACE, cache_key)
+            if cached is not None:
+                return AugmentedFragment(**cached)
+
         prompt = self._build_injection_prompt(fragment, placeholders)
         augmented_text = self._call_llm(prompt)
 
         filled = {p.placeholder: "llm_generated" for p in placeholders}
-        return AugmentedFragment(
+        result = AugmentedFragment(
             original_fragment=fragment,
             augmented_text=augmented_text,
             filled_placeholders=filled,
             augmentation_method="llm_injected",
             llm_model_used=self.config.model,
         )
+
+        # --- Persist to cache ---
+        if self._cache is not None:
+            self._cache.set(self.CACHE_NAMESPACE, cache_key, result.model_dump())
+
+        return result
 
     def augment_batch(self, fragments: list[SplitFragment]) -> list[AugmentedFragment]:
         results = []
@@ -255,6 +285,7 @@ Output ONLY the augmented text, nothing else. Do not add explanations or comment
 def surgical_llm_injection(
     fragments: list[SplitFragment],
     config: Optional[LLMConfig] = None,
+    cache: Optional[LLMCache] = None,
 ) -> list[AugmentedFragment]:
-    injector = SurgicalLLMInjector(config)
+    injector = SurgicalLLMInjector(config, cache=cache)
     return injector.augment_dataset(fragments)

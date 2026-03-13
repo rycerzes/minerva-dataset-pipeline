@@ -18,6 +18,7 @@ from exporter.dataset_export import DatasetExporter, ExportConfig
 from augmentation.legal_structure_splitter import LegalStructureSplitter
 from augmentation.llm_synthetic import SurgicalLLMInjector
 from augmentation.hard_negative_generator import HardNegativeGenerator
+from augmentation.llm_cache import LLMCache
 from augmentation.class_balancing import NirjasClassBalancer
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,9 @@ def run_pipeline(
     train_split_ratio: float = 0.8,
     enable_llm: bool = True,
     verbose: bool = False,
+    cache_dir: str = "cache",
+    samples_per_category: int = 5,
+    hard_negative_limit: int | None = None,
 ) -> dict:
     total_steps = 8 if enable_llm else 6
 
@@ -55,7 +59,9 @@ def run_pipeline(
     print("=" * 60)
 
     print(f"\n[1/{total_steps}] Fetching ScanCode LicenseDB...")
-    scancode_fetcher = ScanCodeFetcher(base_url=scancode_base_url)
+    scancode_fetcher = ScanCodeFetcher(
+        base_url=scancode_base_url, cache_dir=cache_dir
+    )
     scancode_licenses = scancode_fetcher.fetch_all(
         include_exceptions=include_exceptions,
         include_deprecated=include_deprecated,
@@ -65,7 +71,9 @@ def run_pipeline(
     print(f"  Fetched {scancode_count} licenses ({scancode_with_text} with text)")
 
     print(f"\n[2/{total_steps}] Fetching FOSSology licenseRef.json...")
-    fossology_fetcher = FossologyFetcher(base_url=fossology_base_url)
+    fossology_fetcher = FossologyFetcher(
+        base_url=fossology_base_url, cache_dir=cache_dir
+    )
     fossology_licenses = fossology_fetcher.fetch_all()
     fossology_count = len(fossology_licenses)
     fossology_with_text = sum(1 for lic in fossology_licenses if lic.rf_text)
@@ -114,6 +122,7 @@ def run_pipeline(
         from config import LLMConfig
 
         llm_config = LLMConfig()
+        llm_cache = LLMCache(cache_dir)
 
         step = 5
         fragments_with_ph = [f for f in fragments if f.placeholders]
@@ -121,7 +130,7 @@ def run_pipeline(
             f"\n[{step}/{total_steps}] Surgical LLM injection "
             f"({len(fragments_with_ph)} fragments with placeholders)..."
         )
-        injector = SurgicalLLMInjector(config=llm_config)
+        injector = SurgicalLLMInjector(config=llm_config, cache=llm_cache)
         augmented_fragments = injector.augment_dataset(fragments)
         n_actually_augmented = sum(
             1
@@ -132,19 +141,37 @@ def run_pipeline(
         print(
             f"  Pass-through (no ph): {len(augmented_fragments) - n_actually_augmented:,}"
         )
+        inj_cache = llm_cache.stats
+        print(
+            f"  Cache hits/misses:    {inj_cache['hits']}/{inj_cache['misses']}"
+        )
 
         step = 6
         license_keys = [e.license_key for e in dataset if e.license_text]
+        limit_tag = (
+            f" (limited to {hard_negative_limit})"
+            if hard_negative_limit
+            else ""
+        )
         print(
             f"\n[{step}/{total_steps}] Generating hard negatives "
-            f"for {len(license_keys)} licenses..."
+            f"for {len(license_keys)} licenses{limit_tag}..."
         )
-        neg_generator = HardNegativeGenerator(config=llm_config)
-        hard_negatives = neg_generator.generate_batch(license_keys)
+        neg_generator = HardNegativeGenerator(
+            config=llm_config,
+            samples_per_category=samples_per_category,
+            cache=llm_cache,
+        )
+        hard_negatives = neg_generator.generate_batch(
+            license_keys, max_licenses=hard_negative_limit
+        )
         neg_stats = neg_generator.get_statistics(hard_negatives)
         print(f"  Total hard negatives: {neg_stats['total']:,}")
         for ntype, ncount in sorted(neg_stats.get("by_type", {}).items()):
             print(f"    {ntype:25s} {ncount:,}")
+        if "cache" in neg_stats:
+            cs = neg_stats["cache"]
+            print(f"  Cache hits/misses:    {cs['hits']}/{cs['misses']}")
 
     step = total_steps - 1
     print(f"\n[{step}/{total_steps}] Balancing Nirjas classes & augmented merge...")
@@ -262,6 +289,33 @@ def main():
             "synthetic augmentation or Nirjas hard negatives."
         ),
     )
+    parser.add_argument(
+        "--cache-dir",
+        default="cache",
+        help=(
+            "Directory for caching LLM responses so re-runs skip "
+            "already-completed work (default: cache)"
+        ),
+    )
+    parser.add_argument(
+        "--samples-per-category",
+        type=int,
+        default=5,
+        help=(
+            "Number of hard-negative samples to request per category "
+            "per license (default: 5). Lower values reduce token usage."
+        ),
+    )
+    parser.add_argument(
+        "--hard-negative-limit",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of licenses to generate hard negatives for. "
+            "If omitted, all licenses with text are processed. "
+            "Use e.g. --hard-negative-limit 200 to save tokens."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -275,6 +329,9 @@ def main():
         train_split_ratio=args.train_split_ratio,
         enable_llm=not args.no_llm,
         verbose=args.verbose,
+        cache_dir=args.cache_dir,
+        samples_per_category=args.samples_per_category,
+        hard_negative_limit=args.hard_negative_limit,
     )
 
 

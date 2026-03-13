@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,20 @@ try:
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from config import LLMConfig, RateLimiter
+
+from .llm_cache import LLMCache
+
+# ---------------------------------------------------------------------------
+# Section markers used in the combined prompt / response
+# ---------------------------------------------------------------------------
+_SECTION_MARKERS = {
+    "license_discussion": "=== LICENSE_DISCUSSION ===",
+    "todo_fixme": "=== TODO_FIXME ===",
+    "commented_code": "=== COMMENTED_CODE ===",
+    "copyright_discussion": "=== COPYRIGHT_DISCUSSION ===",
+}
+
+_ORDERED_TYPES = list(_SECTION_MARKERS.keys())
 
 
 class HardNegativeSample(BaseModel):
@@ -32,6 +47,18 @@ class HardNegativeGeneratorError(Exception):
 
 
 class HardNegativeGenerator:
+    """Generate hard-negative samples for license classification training.
+
+    Optimisations over the original implementation
+    -----------------------------------------------
+    * **Combined prompt** — all 4 negative categories are requested in a
+      single LLM call per license (was 4 calls).
+    * **Disk cache** — results are persisted so re-runs skip already-
+      completed licenses.
+    * **Configurable subset** — callers can limit how many licenses are
+      processed via ``max_licenses`` in ``generate_batch``.
+    """
+
     # Category weights for distribution across negative types
     LICENSE_DISCUSSION_WEIGHT: float = 0.3
     TODO_FIXME_WEIGHT: float = 0.3
@@ -41,15 +68,23 @@ class HardNegativeGenerator:
     MAX_RETRIES: int = 3
     RETRY_BACKOFF_BASE: float = 2.0
 
+    CACHE_NAMESPACE: str = "hard_negatives"
+
     def __init__(
         self,
         config: Optional[LLMConfig] = None,
         samples_per_category: int = 5,
+        cache: Optional[LLMCache] = None,
     ):
         self.config = config or LLMConfig()
         self.samples_per_category = samples_per_category
         self._rate_limiter = RateLimiter(self.config.rpm)
         self._llm_client = None
+        self._cache = cache
+
+    # ------------------------------------------------------------------
+    # LLM client
+    # ------------------------------------------------------------------
 
     def _get_llm_client(self):
         import litellm
@@ -58,70 +93,103 @@ class HardNegativeGenerator:
         self._llm_client = litellm
         return self._llm_client
 
-    def _build_license_discussion_prompt(
+    # ------------------------------------------------------------------
+    # Combined prompt (Option 1: 4 calls → 1)
+    # ------------------------------------------------------------------
+
+    def _build_combined_prompt(
         self, license_key: str, context: Optional[str] = None
     ) -> str:
-        prompt = f"""You are a developer discussing software licenses in code comments. Generate realistic, natural developer conversations about licenses that are NOT legally binding license texts.
+        n = self.samples_per_category
+        ctx = f"\n(Optional context: {context})" if context else ""
 
-Generate {self.samples_per_category} varied examples of developer discussions about the "{license_key}" license.
+        prompt = f"""You are a developer and code-comment generator. Generate realistic hard-negative examples for the "{license_key}" license across 4 categories.{ctx}
 
-Requirements:
-1. Write in the style of informal developer comments (not legal language)
-2. Questions, opinions, uncertainty about licenses are appropriate
-3. Include mentions of: TODO, FIXME, uncertainty, opinions, questions
-4. Do NOT include actual license text - only discussions, questions, opinions
-5. Make it look like authentic developer communication in source code comments
-6. Include realistic typos, casual language
-7. Mix of single-line comments (//, #) and multi-line comments (/* */)
-8. Each example should be 1-3 sentences
-{f"(Optional context: {context})" if context else ""}
+Output EXACTLY {n} items per category. Separate categories using the markers shown below.
+Each item should be on its own line. Do not number them or add extra formatting.
 
-Output each example on a new line, nothing else."""
+{_SECTION_MARKERS["license_discussion"]}
+Generate {n} informal developer discussions about the "{license_key}" license in code comments.
+Style: casual, opinionated, uncertain. Mix comment styles (//, #, /* */). 1-3 sentences each.
+Do NOT include actual license text — only discussions, questions, opinions.
+
+{_SECTION_MARKERS["todo_fixme"]}
+Generate {n} realistic TODO/FIXME comments related to "{license_key}" licensing tasks.
+Include practical tasks: updating headers, checking compliance, adding licenses.
+Mix TODO and FIXME prefixes. Include realistic file paths or function names. 1-2 lines each.
+
+{_SECTION_MARKERS["commented_code"]}
+Generate {n} examples of code commented out or disabled due to "{license_key}" licensing issues.
+Show commented-out code blocks with license-related explanations.
+Mix comment styles (#, //, /* */). Include realistic function names and variables.
+
+{_SECTION_MARKERS["copyright_discussion"]}
+Generate {n} informal developer comments discussing copyright issues for "{license_key}".
+Questions about ownership, updating years, adding contributors.
+Do NOT write actual license text — only discussions. Mix comment styles."""
         return prompt
 
-    def _build_todo_fixme_prompt(self, license_key: str) -> str:
-        prompt = f"""Generate {self.samples_per_category} realistic TODO and FIXME comments related to software licensing tasks for the "{license_key}" license.
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
 
-Requirements:
-1. Write as authentic developer TODO/FIXME comments
-2. Include practical tasks: updating headers, checking compliance, adding licenses
-3. Include common developer frustrations around license management
-4. Mix of TODO and FIXME prefixes
-5. Include realistic file paths, function names when appropriate
-6. Each should be 1-2 lines
+    @staticmethod
+    def _parse_combined_response(
+        text: str, license_key: str, model: str
+    ) -> list[HardNegativeSample]:
+        """Parse a combined LLM response into individual ``HardNegativeSample``s."""
+        results: list[HardNegativeSample] = []
 
-Output each example on a new line, nothing else."""
-        return prompt
+        # Locate each section marker
+        marker_positions: list[tuple[int, str]] = []
+        for neg_type, marker in _SECTION_MARKERS.items():
+            pos = text.find(marker)
+            if pos != -1:
+                marker_positions.append((pos, neg_type))
 
-    def _build_commented_code_prompt(self, license_key: str) -> str:
-        prompt = f"""Generate {self.samples_per_category} examples of code that was commented out or disabled due to licensing issues for code related to "{license_key}" license.
+        marker_positions.sort()
 
-Requirements:
-1. Show commented-out code blocks with license-related explanations
-2. Include placeholders for removed proprietary code
-3. Show code that checks or verifies licenses
-4. Include both single-line (#, //) and multi-line (/* */) comment styles
-5. Show realistic function names, variables related to licensing
-6. Include brief comments explaining why code was disabled
+        # Extract section text between markers
+        sections: dict[str, str] = {}
+        for i, (pos, neg_type) in enumerate(marker_positions):
+            start = pos + len(_SECTION_MARKERS[neg_type])
+            end = (
+                marker_positions[i + 1][0]
+                if i + 1 < len(marker_positions)
+                else len(text)
+            )
+            sections[neg_type] = text[start:end].strip()
 
-Output each example on a new line, nothing else."""
-        return prompt
+        # Parse each section into individual lines → samples
+        for neg_type in _ORDERED_TYPES:
+            section_text = sections.get(neg_type, "")
+            if not section_text:
+                continue
 
-    def _build_copyright_discussion_prompt(self, license_key: str) -> str:
-        prompt = f"""Generate {self.samples_per_category} developer comments discussing copyright issues, ownership, and attribution for the "{license_key}" license.
+            lines = [line.strip() for line in section_text.split("\n") if line.strip()]
+            # Strip leading numbering (e.g. "1. " or "2) ")
+            lines = [re.sub(r"^\d+[\.\)]\s*", "", ln) for ln in lines if len(ln) > 5]
+            lines = [ln for ln in lines if len(ln) > 5]
 
-Requirements:
-1. Write as informal developer discussions in comments
-2. Questions about: who owns what, updating years, adding names
-3. Uncertainty and opinions about copyright are appropriate
-4. Include: updating copyright years, adding contributors, ownership transfer
-5. Do NOT write actual license text - only discussions
-6. Mix of comment styles (#, //, /* */)
+            for line in lines:
+                results.append(
+                    HardNegativeSample(
+                        text=line,
+                        negative_type=neg_type,
+                        generation_method="llm_generated",
+                        source_license=license_key,
+                        llm_model_used=model,
+                    )
+                )
 
-Output each example on a new line, nothing else."""
-        return prompt
+        return results
 
-    def _call_llm(self, prompt: str) -> list[str]:
+    # ------------------------------------------------------------------
+    # LLM call with retries
+    # ------------------------------------------------------------------
+
+    def _call_llm(self, prompt: str) -> str:
+        """Call the LLM and return the raw response text."""
         client = self._get_llm_client()
         last_error: Exception | None = None
 
@@ -139,20 +207,15 @@ Output each example on a new line, nothing else."""
                 )
                 content = response["choices"][0]["message"]["content"]
                 if content is None:
-                    raise HardNegativeGeneratorError(
-                        "LLM returned None content"
-                    )
+                    raise HardNegativeGeneratorError("LLM returned None content")
                 text = content.strip()
                 if not text:
                     raise HardNegativeGeneratorError("LLM returned empty response")
-
-                lines = [line.strip() for line in text.split("\n") if line.strip()]
-                lines = [l for l in lines if len(l) > 5]  # noqa: E741
-                return lines
+                return text
             except Exception as e:
                 last_error = e
                 if attempt < self.MAX_RETRIES:
-                    wait = self.RETRY_BACKOFF_BASE**attempt
+                    wait = self.RETRY_BACKOFF_BASE ** attempt
                     logger.warning(
                         "LLM call failed (attempt %d/%d), retrying in %.1fs: %s",
                         attempt,
@@ -166,114 +229,136 @@ Output each example on a new line, nothing else."""
             f"LLM API call failed after {self.MAX_RETRIES} attempts: {last_error}"
         ) from last_error
 
-    def generate_license_discussion(
-        self, license_key: str, context: Optional[str] = None
-    ) -> list[HardNegativeSample]:
-        prompt = self._build_license_discussion_prompt(license_key, context)
-        samples = self._call_llm(prompt)
-
-        return [
-            HardNegativeSample(
-                text=sample,
-                negative_type="license_discussion",
-                generation_method="llm_generated",
-                source_license=license_key,
-                llm_model_used=self.config.model,
-            )
-            for sample in samples
-        ]
-
-    def generate_todo_fixme(self, license_key: str) -> list[HardNegativeSample]:
-        prompt = self._build_todo_fixme_prompt(license_key)
-        samples = self._call_llm(prompt)
-
-        return [
-            HardNegativeSample(
-                text=sample,
-                negative_type="todo_fixme",
-                generation_method="llm_generated",
-                source_license=license_key,
-                llm_model_used=self.config.model,
-            )
-            for sample in samples
-        ]
-
-    def generate_commented_code(self, license_key: str) -> list[HardNegativeSample]:
-        prompt = self._build_commented_code_prompt(license_key)
-        samples = self._call_llm(prompt)
-
-        return [
-            HardNegativeSample(
-                text=sample,
-                negative_type="commented_code",
-                generation_method="llm_generated",
-                source_license=license_key,
-                llm_model_used=self.config.model,
-            )
-            for sample in samples
-        ]
-
-    def generate_copyright_discussion(
-        self, license_key: str
-    ) -> list[HardNegativeSample]:
-        prompt = self._build_copyright_discussion_prompt(license_key)
-        samples = self._call_llm(prompt)
-
-        return [
-            HardNegativeSample(
-                text=sample,
-                negative_type="copyright_discussion",
-                generation_method="llm_generated",
-                source_license=license_key,
-                llm_model_used=self.config.model,
-            )
-            for sample in samples
-        ]
+    # ------------------------------------------------------------------
+    # Per-license generation (combined prompt + cache)
+    # ------------------------------------------------------------------
 
     def generate_for_license(
         self, license_key: str, context: Optional[str] = None
     ) -> list[HardNegativeSample]:
+        """Generate hard negatives for a single license (1 LLM call).
+
+        Results are read from / written to the disk cache when available.
+        """
+        # --- Cache check ---
+        if self._cache is not None:
+            cached = self._cache.get(self.CACHE_NAMESPACE, license_key)
+            if cached is not None:
+                return [HardNegativeSample(**s) for s in cached]
+
+        # --- LLM call (single combined prompt) ---
+        prompt = self._build_combined_prompt(license_key, context)
+        raw_response = self._call_llm(prompt)
+        samples = self._parse_combined_response(
+            raw_response, license_key, self.config.model
+        )
+
+        # --- Trim to requested counts per category ---
+        weight_map = {
+            "license_discussion": self.LICENSE_DISCUSSION_WEIGHT,
+            "todo_fixme": self.TODO_FIXME_WEIGHT,
+            "commented_code": self.COMMENTED_CODE_WEIGHT,
+            "copyright_discussion": self.COPYRIGHT_DISCUSSION_WEIGHT,
+        }
+
+        trimmed: list[HardNegativeSample] = []
+        for neg_type, weight in weight_map.items():
+            count = max(1, int(self.samples_per_category * weight))
+            typed = [s for s in samples if s.negative_type == neg_type]
+            trimmed.extend(typed[:count])
+
+        # --- Persist to cache ---
+        if self._cache is not None:
+            self._cache.set(
+                self.CACHE_NAMESPACE,
+                license_key,
+                [s.model_dump() for s in trimmed],
+            )
+
+        return trimmed
+
+    # ------------------------------------------------------------------
+    # Legacy single-category helpers (backward compat for tests)
+    # ------------------------------------------------------------------
+
+    def generate_license_discussion(
+        self, license_key: str, context: Optional[str] = None
+    ) -> list[HardNegativeSample]:
+        prompt = self._build_combined_prompt(license_key, context)
+        raw = self._call_llm(prompt)
+        all_samples = self._parse_combined_response(
+            raw, license_key, self.config.model
+        )
+        return [s for s in all_samples if s.negative_type == "license_discussion"]
+
+    def generate_todo_fixme(self, license_key: str) -> list[HardNegativeSample]:
+        prompt = self._build_combined_prompt(license_key)
+        raw = self._call_llm(prompt)
+        all_samples = self._parse_combined_response(
+            raw, license_key, self.config.model
+        )
+        return [s for s in all_samples if s.negative_type == "todo_fixme"]
+
+    def generate_commented_code(self, license_key: str) -> list[HardNegativeSample]:
+        prompt = self._build_combined_prompt(license_key)
+        raw = self._call_llm(prompt)
+        all_samples = self._parse_combined_response(
+            raw, license_key, self.config.model
+        )
+        return [s for s in all_samples if s.negative_type == "commented_code"]
+
+    def generate_copyright_discussion(
+        self, license_key: str,
+    ) -> list[HardNegativeSample]:
+        prompt = self._build_combined_prompt(license_key)
+        raw = self._call_llm(prompt)
+        all_samples = self._parse_combined_response(
+            raw, license_key, self.config.model
+        )
+        return [s for s in all_samples if s.negative_type == "copyright_discussion"]
+
+    # ------------------------------------------------------------------
+    # Batch generation
+    # ------------------------------------------------------------------
+
+    def generate_batch(
+        self,
+        license_keys: list[str],
+        max_licenses: Optional[int] = None,
+    ) -> list[HardNegativeSample]:
+        """Generate hard negatives for a list of licenses.
+
+        Parameters
+        ----------
+        license_keys:
+            All license keys to process.
+        max_licenses:
+            If set, only process the first *max_licenses* keys
+            (Option 3 — subset selection).
+        """
+        keys = license_keys[:max_licenses] if max_licenses else license_keys
+        total = len(keys)
         results: list[HardNegativeSample] = []
 
-        license_discussion_count = max(
-            1, int(self.samples_per_category * self.LICENSE_DISCUSSION_WEIGHT)
-        )
-        todo_fixme_count = max(
-            1, int(self.samples_per_category * self.TODO_FIXME_WEIGHT)
-        )
-        commented_code_count = max(
-            1, int(self.samples_per_category * self.COMMENTED_CODE_WEIGHT)
-        )
-        copyright_discussion_count = max(
-            1, int(self.samples_per_category * self.COPYRIGHT_DISCUSSION_WEIGHT)
-        )
-
-        results.extend(
-            self.generate_license_discussion(license_key, context)[
-                :license_discussion_count
-            ]
-        )
-        results.extend(self.generate_todo_fixme(license_key)[:todo_fixme_count])
-        results.extend(self.generate_commented_code(license_key)[:commented_code_count])
-        results.extend(
-            self.generate_copyright_discussion(license_key)[:copyright_discussion_count]
-        )
-
-        return results
-
-    def generate_batch(self, license_keys: list[str]) -> list[HardNegativeSample]:
-        results: list[HardNegativeSample] = []
-        for license_key in license_keys:
+        for i, license_key in enumerate(keys, 1):
+            is_cached = (
+                self._cache is not None
+                and self._cache.has(self.CACHE_NAMESPACE, license_key)
+            )
+            if i % 50 == 1 or i == total:
+                tag = " (cached)" if is_cached else ""
+                print(f"  [{i}/{total}] {license_key}{tag}")
             results.extend(self.generate_for_license(license_key))
+
         return results
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
 
     def get_statistics(self, samples: list[HardNegativeSample]) -> dict:
         if not samples:
-            return {
-                "total": 0,
-                "by_type": {},
-                "by_method": {},
-            }
+            return {"total": 0, "by_type": {}, "by_method": {}}
 
         by_type: dict[str, int] = {}
         by_method: dict[str, int] = {}
@@ -284,20 +369,33 @@ Output each example on a new line, nothing else."""
                 by_method.get(sample.generation_method, 0) + 1
             )
 
-        return {
+        stats: dict = {
             "total": len(samples),
             "by_type": by_type,
             "by_method": by_method,
         }
+
+        if self._cache:
+            stats["cache"] = self._cache.stats
+
+        return stats
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience function
+# ---------------------------------------------------------------------------
 
 
 def generate_hard_negatives(
     license_keys: list[str],
     config: Optional[LLMConfig] = None,
     samples_per_category: int = 5,
+    cache: Optional[LLMCache] = None,
+    max_licenses: Optional[int] = None,
 ) -> list[HardNegativeSample]:
     generator = HardNegativeGenerator(
         config=config,
         samples_per_category=samples_per_category,
+        cache=cache,
     )
-    return generator.generate_batch(license_keys)
+    return generator.generate_batch(license_keys, max_licenses=max_licenses)
