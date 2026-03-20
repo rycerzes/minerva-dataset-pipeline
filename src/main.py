@@ -19,7 +19,7 @@ from augmentation.legal_structure_splitter import LegalStructureSplitter
 from augmentation.llm_synthetic import SurgicalLLMInjector
 from augmentation.hard_negative_generator import HardNegativeGenerator
 from augmentation.llm_cache import LLMCache
-from augmentation.class_balancing import NirjasClassBalancer
+from augmentation.class_balancing import NirjasClassBalancer, BalancingConfig
 from fetchers.code_comments import CodeCommentFetcher
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ def run_pipeline(
     samples_per_category: int = 5,
     hard_negative_limit: int | None = None,
     code_comments_limit: int = 25_000,
+    max_nirjas_samples: int | None = None,
 ) -> dict:
     total_steps = 9 if enable_llm else 7
 
@@ -189,7 +190,11 @@ def run_pipeline(
     print(f"\n[{step}/{total_steps}] Balancing Nirjas classes & augmented merge...")
 
     # Nirjas class balancing
-    balancer = NirjasClassBalancer()
+    balancer = NirjasClassBalancer(
+        BalancingConfig(max_total_samples=max_nirjas_samples)
+        if max_nirjas_samples is not None
+        else None
+    )
     nirjas_balanced = balancer.balance(
         fragments=fragments,
         augmented=augmented_fragments,
@@ -340,6 +345,19 @@ def main():
             "Set to 0 to disable and reproduce the previous behaviour."
         ),
     )
+    parser.add_argument(
+        "--max-nirjas-samples",
+        type=int,
+        default=None,
+        help=(
+            "Hard cap on the total Nirjas dataset size before train/test split. "
+            "Prevents excessive upsampling of the positive class when the negative "
+            "pool (hard negatives + code comments) is much larger than the positive "
+            "pool (license fragments). The cap is split 50/50 between classes. "
+            "Example: --max-nirjas-samples 200000 caps at 100k per class. "
+            "If omitted, the dataset size equals the sum of both pools."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -357,6 +375,7 @@ def main():
         samples_per_category=args.samples_per_category,
         hard_negative_limit=args.hard_negative_limit,
         code_comments_limit=args.code_comments_limit,
+        max_nirjas_samples=args.max_nirjas_samples,
     )
 
 
