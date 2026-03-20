@@ -20,6 +20,7 @@ from augmentation.llm_synthetic import SurgicalLLMInjector
 from augmentation.hard_negative_generator import HardNegativeGenerator
 from augmentation.llm_cache import LLMCache
 from augmentation.class_balancing import NirjasClassBalancer
+from fetchers.code_comments import CodeCommentFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,9 @@ def run_pipeline(
     cache_dir: str = "cache",
     samples_per_category: int = 5,
     hard_negative_limit: int | None = None,
+    code_comments_limit: int = 25_000,
 ) -> dict:
-    total_steps = 8 if enable_llm else 6
+    total_steps = 9 if enable_llm else 7
 
     print("=" * 60)
     print("Minerva Dataset Pipeline")
@@ -109,6 +111,7 @@ def run_pipeline(
 
     augmented_fragments = []
     hard_negatives = []
+    code_comments = []
 
     if enable_llm:
         if not _llm_available():
@@ -173,6 +176,15 @@ def run_pipeline(
             cs = neg_stats["cache"]
             print(f"  Cache hits/misses:    {cs['hits']}/{cs['misses']}")
 
+    step = total_steps - 2
+    if code_comments_limit > 0:
+        print(f"\n[{step}/{total_steps}] Fetching generic code comments (negative class)...")
+        comment_fetcher = CodeCommentFetcher(cache_dir=cache_dir)
+        code_comments = comment_fetcher.fetch(max_samples=code_comments_limit)
+        print(f"  Fetched {len(code_comments):,} clean non-license code comments")
+    else:
+        print(f"\n[{step}/{total_steps}] Skipping code comments (--code-comments-limit 0)")
+
     step = total_steps - 1
     print(f"\n[{step}/{total_steps}] Balancing Nirjas classes & augmented merge...")
 
@@ -182,6 +194,7 @@ def run_pipeline(
         fragments=fragments,
         augmented=augmented_fragments,
         hard_negatives=hard_negatives,
+        code_comments=code_comments if code_comments_limit > 0 else None,
     )
     balancer.print_statistics(nirjas_balanced)
 
@@ -225,6 +238,7 @@ def run_pipeline(
         "fragments_with_placeholders": frag_stats["fragments_with_placeholders"],
         "augmented_fragments": len(augmented_fragments),
         "hard_negatives": len(hard_negatives),
+        "code_comments": len(code_comments),
         "nirjas_balanced": len(nirjas_balanced),
         "atarashi_samples": len(atarashi_samples),
         "nirjas_samples": len(nirjas_samples),
@@ -316,6 +330,16 @@ def main():
             "Use e.g. --hard-negative-limit 200 to save tokens."
         ),
     )
+    parser.add_argument(
+        "--code-comments-limit",
+        type=int,
+        default=25_000,
+        help=(
+            "Number of generic code comments to fetch from bigcode/the-stack-smol "
+            "and add to the not_license_related class (default: 25000). "
+            "Set to 0 to disable and reproduce the previous behaviour."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -332,6 +356,7 @@ def main():
         cache_dir=args.cache_dir,
         samples_per_category=args.samples_per_category,
         hard_negative_limit=args.hard_negative_limit,
+        code_comments_limit=args.code_comments_limit,
     )
 
 

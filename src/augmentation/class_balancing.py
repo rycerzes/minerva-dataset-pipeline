@@ -19,11 +19,20 @@ import random
 import re
 from typing import Literal, Optional
 
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .legal_structure_splitter import SplitFragment
 from .llm_synthetic import AugmentedFragment
 from .hard_negative_generator import HardNegativeSample
+
+try:
+    from ..fetchers.code_comments import CodeCommentSample
+except ImportError:
+    # Allow direct / standalone execution
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    from fetchers.code_comments import CodeCommentSample  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +213,7 @@ class NirjasClassBalancer:
     def _build_not_license_related_pool(
         self,
         hard_negatives: list[HardNegativeSample],
+        code_comments: list[CodeCommentSample] | None = None,
     ) -> list[BalancedSample]:
         """Class 2 — not-license-related samples."""
         pool: list[BalancedSample] = []
@@ -223,6 +233,23 @@ class NirjasClassBalancer:
                     license_key=neg.source_license,
                     negative_type=neg.negative_type,
                     generation_method=neg.generation_method,
+                )
+            )
+
+        # 2b. Real code comments extracted from public source repositories
+        for comment in (code_comments or []):
+            text = comment.text.strip()
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+            pool.append(
+                BalancedSample(
+                    text=text,
+                    label="not_license_related",
+                    source="code_corpus",
+                    negative_type="generic_code_comment",
+                    generation_method="extracted",
+                    metadata={"language": comment.language, "comment_type": comment.comment_type},
                 )
             )
 
@@ -300,6 +327,7 @@ class NirjasClassBalancer:
         fragments: Optional[list[SplitFragment]] = None,
         augmented: Optional[list[AugmentedFragment]] = None,
         hard_negatives: Optional[list[HardNegativeSample]] = None,
+        code_comments: Optional[list[CodeCommentSample]] = None,
     ) -> list[BalancedSample]:
         """Build and balance the 2-class Nirjas dataset.
 
@@ -311,6 +339,8 @@ class NirjasClassBalancer:
             LLM-augmented ``AugmentedFragment`` objects (Class 1 source).
         hard_negatives:
             LLM-generated ``HardNegativeSample`` objects (Class 2 source).
+        code_comments:
+            Real code comments from a public corpus (Class 2 source).
 
         Returns
         -------
@@ -322,7 +352,7 @@ class NirjasClassBalancer:
         hard_negatives = hard_negatives or []
 
         license_pool = self._build_license_related_pool(fragments, augmented)
-        non_license_pool = self._build_not_license_related_pool(hard_negatives)
+        non_license_pool = self._build_not_license_related_pool(hard_negatives, code_comments)
 
         logger.info(
             "Pre-balance pool sizes — license_related: %d, not_license_related: %d",
@@ -408,6 +438,7 @@ def balance_nirjas_dataset(
     fragments: Optional[list[SplitFragment]] = None,
     augmented: Optional[list[AugmentedFragment]] = None,
     hard_negatives: Optional[list[HardNegativeSample]] = None,
+    code_comments: Optional[list[CodeCommentSample]] = None,
     target_ratio: float = 0.5,
     max_total_samples: Optional[int] = None,
     random_seed: int = 42,
@@ -430,4 +461,5 @@ def balance_nirjas_dataset(
         fragments=fragments,
         augmented=augmented,
         hard_negatives=hard_negatives,
+        code_comments=code_comments,
     )
