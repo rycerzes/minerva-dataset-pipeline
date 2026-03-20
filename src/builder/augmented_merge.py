@@ -29,6 +29,7 @@ try:
     from ..augmentation.llm_synthetic import AugmentedFragment
     from ..augmentation.hard_negative_generator import HardNegativeSample
     from ..augmentation.class_balancing import BalancedSample
+    from ..utils import dedup_near_duplicates
 except ImportError:  # pragma: no cover — direct-script execution
     import sys
     from pathlib import Path
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover — direct-script execution
     from augmentation.llm_synthetic import AugmentedFragment
     from augmentation.hard_negative_generator import HardNegativeSample
     from augmentation.class_balancing import BalancedSample
+    from utils import dedup_near_duplicates
 
 logger = logging.getLogger(__name__)
 
@@ -322,12 +324,54 @@ class AugmentedMerger:
 
         logger.info("Atarashi post-stratification: %d samples", len(atarashi))
 
+        # Near-dedup within each license_key group so that cross-license
+        # similarity (e.g. GPL-2.0 vs GPL-3.0) is preserved.
+        atarashi = self._dedup_atarashi(atarashi)
+        logger.info("Atarashi post-near-dedup: %d samples", len(atarashi))
+
         # --- Nirjas ---
         nirjas = self._convert_nirjas(nirjas_balanced)
 
         logger.info("Nirjas samples: %d", len(nirjas))
 
+        # Global near-dedup across all Nirjas text spans.
+        before = len(nirjas)
+        keep = dedup_near_duplicates([s.text for s in nirjas])
+        nirjas = [nirjas[i] for i in keep]
+        if len(nirjas) < before:
+            logger.info(
+                "Nirjas near-dedup removed %d samples → %d remaining",
+                before - len(nirjas),
+                len(nirjas),
+            )
+
         return atarashi, nirjas
+
+    @staticmethod
+    def _dedup_atarashi(
+        samples: list[AtarashiSample],
+    ) -> list[AtarashiSample]:
+        """Near-dedup Atarashi samples within each ``license_key`` group.
+
+        Cross-key dedup is intentionally skipped: different licenses may
+        legitimately share large bodies of text (e.g. GPL-2.0 vs GPL-3.0)
+        and removing those samples would silently reduce class coverage.
+        """
+        if not samples:
+            return samples
+
+        by_key: dict[str, list[int]] = defaultdict(list)
+        for i, s in enumerate(samples):
+            by_key[s.license_key].append(i)
+
+        keep_indices: set[int] = set()
+        for key, indices in by_key.items():
+            texts = [samples[i].text for i in indices]
+            local_keep = dedup_near_duplicates(texts)
+            for local_idx in local_keep:
+                keep_indices.add(indices[local_idx])
+
+        return [s for i, s in enumerate(samples) if i in keep_indices]
 
     @staticmethod
     def get_atarashi_statistics(samples: list[AtarashiSample]) -> dict:
