@@ -23,6 +23,10 @@ from .class_balancing import (
     NirjasClassBalancer,
     balance_nirjas_dataset,
 )
+from .rare_license_augmenter import (
+    RareLicenseAugmenterConfig,
+    RareLicenseAugmenter,
+)
 
 __all__ = [
     "LegalStructureSplitter",
@@ -42,4 +46,6 @@ __all__ = [
     "BalancingConfig",
     "NirjasClassBalancer",
     "balance_nirjas_dataset",
+    "RareLicenseAugmenterConfig",
+    "RareLicenseAugmenter",
 ]

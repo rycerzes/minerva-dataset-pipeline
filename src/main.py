@@ -20,6 +20,10 @@ from augmentation.llm_synthetic import SurgicalLLMInjector
 from augmentation.hard_negative_generator import HardNegativeGenerator
 from augmentation.llm_cache import LLMCache
 from augmentation.class_balancing import NirjasClassBalancer, BalancingConfig
+from augmentation.rare_license_augmenter import (
+    RareLicenseAugmenter,
+    RareLicenseAugmenterConfig,
+)
 from fetchers.code_comments import CodeCommentFetcher
 
 logger = logging.getLogger(__name__)
@@ -54,8 +58,10 @@ def run_pipeline(
     hard_negative_limit: int | None = None,
     code_comments_limit: int = 25_000,
     max_nirjas_samples: int | None = None,
+    rare_license_threshold: int = 5,
+    rare_license_augment_count: int = 5,
 ) -> dict:
-    total_steps = 9 if enable_llm else 7
+    total_steps = 10 if enable_llm else 7
 
     print("=" * 60)
     print("Minerva Dataset Pipeline")
@@ -151,6 +157,29 @@ def run_pipeline(
         )
 
         step = 6
+        print(
+            f"\n[{step}/{total_steps}] Augmenting rare-class licenses "
+            f"(threshold < {rare_license_threshold} fragments)..."
+        )
+        rare_augmenter = RareLicenseAugmenter(
+            config=RareLicenseAugmenterConfig(
+                threshold=rare_license_threshold,
+                augment_count=rare_license_augment_count,
+            ),
+            llm_config=llm_config,
+            cache=llm_cache,
+        )
+        rare_fragments = rare_augmenter.augment(
+            base_dataset=dataset,
+            existing_fragments=fragments,
+        )
+        rare_stats = rare_augmenter.get_statistics(rare_fragments)
+        print(f"  Synthetic fragments generated: {rare_stats['total']:,}")
+        print(f"  Rare licenses augmented:       {rare_stats['unique_licenses']:,}")
+        # Append to fragment pool so downstream stages (Atarashi + Nirjas) see them
+        fragments = fragments + rare_fragments
+
+        step = 7
         license_keys = [e.license_key for e in dataset if e.license_text]
         limit_tag = (
             f" (limited to {hard_negative_limit})"
@@ -242,6 +271,7 @@ def run_pipeline(
         "fragments_total": frag_stats["total_fragments"],
         "fragments_with_placeholders": frag_stats["fragments_with_placeholders"],
         "augmented_fragments": len(augmented_fragments),
+        "rare_augmented_fragments": rare_stats["total"] if enable_llm else 0,
         "hard_negatives": len(hard_negatives),
         "code_comments": len(code_comments),
         "nirjas_balanced": len(nirjas_balanced),
@@ -358,6 +388,25 @@ def main():
             "If omitted, the dataset size equals the sum of both pools."
         ),
     )
+    parser.add_argument(
+        "--rare-license-threshold",
+        type=int,
+        default=5,
+        help=(
+            "Licenses with fewer than this many sliding-window fragments will be "
+            "augmented with LLM-paraphrased variants (default: 5). "
+            "Set higher to augment more licenses."
+        ),
+    )
+    parser.add_argument(
+        "--rare-license-augment-count",
+        type=int,
+        default=5,
+        help=(
+            "Number of paraphrased variants to generate per rare license "
+            "(default: 5). Results are cached so re-runs are free."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -376,6 +425,8 @@ def main():
         hard_negative_limit=args.hard_negative_limit,
         code_comments_limit=args.code_comments_limit,
         max_nirjas_samples=args.max_nirjas_samples,
+        rare_license_threshold=args.rare_license_threshold,
+        rare_license_augment_count=args.rare_license_augment_count,
     )
 
 
