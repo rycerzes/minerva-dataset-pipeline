@@ -94,6 +94,7 @@ class LLMConfig:
         self.max_tokens: int = _require_int(env_vars, "LITELLM_MAX_TOKENS")
         self.rpm: int = _require_int(env_vars, "LITELLM_RPM")
 
+
 class RateLimiter:
     """Thread-safe token-bucket rate limiter.
 

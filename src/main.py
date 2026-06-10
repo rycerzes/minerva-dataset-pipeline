@@ -68,9 +68,7 @@ def run_pipeline(
     print("=" * 60)
 
     print(f"\n[1/{total_steps}] Fetching ScanCode LicenseDB...")
-    scancode_fetcher = ScanCodeFetcher(
-        base_url=scancode_base_url, cache_dir=cache_dir
-    )
+    scancode_fetcher = ScanCodeFetcher(base_url=scancode_base_url, cache_dir=cache_dir)
     scancode_licenses = scancode_fetcher.fetch_all(
         include_exceptions=include_exceptions,
         include_deprecated=include_deprecated,
@@ -152,9 +150,7 @@ def run_pipeline(
             f"  Pass-through (no ph): {len(augmented_fragments) - n_actually_augmented:,}"
         )
         inj_cache = llm_cache.stats
-        print(
-            f"  Cache hits/misses:    {inj_cache['hits']}/{inj_cache['misses']}"
-        )
+        print(f"  Cache hits/misses:    {inj_cache['hits']}/{inj_cache['misses']}")
 
         step = 6
         print(
@@ -182,9 +178,7 @@ def run_pipeline(
         step = 7
         license_keys = [e.license_key for e in dataset if e.license_text]
         limit_tag = (
-            f" (limited to {hard_negative_limit})"
-            if hard_negative_limit
-            else ""
+            f" (limited to {hard_negative_limit})" if hard_negative_limit else ""
         )
         print(
             f"\n[{step}/{total_steps}] Generating hard negatives "
@@ -208,12 +202,16 @@ def run_pipeline(
 
     step = total_steps - 2
     if code_comments_limit > 0:
-        print(f"\n[{step}/{total_steps}] Fetching generic code comments (negative class)...")
+        print(
+            f"\n[{step}/{total_steps}] Fetching generic code comments (negative class)..."
+        )
         comment_fetcher = CodeCommentFetcher(cache_dir=cache_dir)
         code_comments = comment_fetcher.fetch(max_samples=code_comments_limit)
         print(f"  Fetched {len(code_comments):,} clean non-license code comments")
     else:
-        print(f"\n[{step}/{total_steps}] Skipping code comments (--code-comments-limit 0)")
+        print(
+            f"\n[{step}/{total_steps}] Skipping code comments (--code-comments-limit 0)"
+        )
 
     step = total_steps - 1
     print(f"\n[{step}/{total_steps}] Balancing Nirjas classes & augmented merge...")

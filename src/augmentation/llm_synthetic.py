@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 try:
     from .legal_structure_splitter import SplitFragment, LEGAL_PLACEHOLDER_PATTERNS
     from ..config import LLMConfig, RateLimiter
+    from .llm_cache import LLMCache
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from augmentation.legal_structure_splitter import (
@@ -20,8 +21,7 @@ except ImportError:
         LEGAL_PLACEHOLDER_PATTERNS,
     )
     from config import LLMConfig, RateLimiter
-
-from .llm_cache import LLMCache
+    from augmentation.llm_cache import LLMCache
 
 
 class PlaceholderContext(BaseModel):
@@ -206,7 +206,9 @@ Output ONLY the augmented text, nothing else. Do not add explanations or comment
         """Deterministic cache key for a fragment."""
         import hashlib
 
-        blob = f"{fragment.license_key}|{fragment.fragment_index}|{fragment.fragment_text}"
+        blob = (
+            f"{fragment.license_key}|{fragment.fragment_index}|{fragment.fragment_text}"
+        )
         return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
     def augment_fragment(self, fragment: SplitFragment) -> AugmentedFragment:

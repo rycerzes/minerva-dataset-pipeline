@@ -42,9 +42,7 @@ except ImportError:  # pragma: no cover — direct-script execution
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 
 
 class ExportConfig(BaseModel):
@@ -81,9 +79,7 @@ class ExportConfig(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # Export result
-# ---------------------------------------------------------------------------
 
 
 class ExportResult(BaseModel):
@@ -101,9 +97,7 @@ class ExportResult(BaseModel):
     nirjas_test: int = 0
 
 
-# ---------------------------------------------------------------------------
 # HF Features schemas
-# ---------------------------------------------------------------------------
 
 ATARASHI_FEATURES = Features(
     {
@@ -123,9 +117,7 @@ NIRJAS_FEATURES = Features(
 )
 
 
-# ---------------------------------------------------------------------------
 # Core exporter
-# ---------------------------------------------------------------------------
 
 
 class DatasetExporter:
@@ -249,7 +241,11 @@ class DatasetExporter:
             split_neg: dict[str, int] = {}
             for i in range(n):
                 row = split_ds[i]
-                label_str = label_names[row["label"]] if isinstance(row["label"], int) else row["label"]
+                label_str = (
+                    label_names[row["label"]]
+                    if isinstance(row["label"], int)
+                    else row["label"]
+                )
                 split_labels[label_str] = split_labels.get(label_str, 0) + 1
                 label_counts[label_str] = label_counts.get(label_str, 0) + 1
                 split_sources[row["source"]] = split_sources.get(row["source"], 0) + 1
@@ -359,7 +355,7 @@ class DatasetExporter:
         print("=" * 60)
 
         if result.atarashi_path:
-            print(f"\n--- Atarashi (licence similarity) ---")
+            print("\n--- Atarashi (licence similarity) ---")
             print(f"  Path:           {result.atarashi_path}")
             print(f"  Total samples:  {result.atarashi_total:,}")
             print(f"  Train split:    {result.atarashi_train:,}")
@@ -368,7 +364,7 @@ class DatasetExporter:
             print("\n  Atarashi: (not exported)")
 
         if result.nirjas_path:
-            print(f"\n--- Nirjas (2-class classification) ---")
+            print("\n--- Nirjas (2-class classification) ---")
             print(f"  Path:           {result.nirjas_path}")
             print(f"  Total samples:  {result.nirjas_total:,}")
             print(f"  Train split:    {result.nirjas_train:,}")
@@ -379,9 +375,7 @@ class DatasetExporter:
         print("=" * 60)
 
 
-# ---------------------------------------------------------------------------
 # Convenience function
-# ---------------------------------------------------------------------------
 
 
 def export_datasets(

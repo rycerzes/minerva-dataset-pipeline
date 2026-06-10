@@ -1,4 +1,5 @@
 """Quick script to verify dataset contents."""
+
 from datasets import load_from_disk
 
 # Load and inspect Atarashi dataset
@@ -47,5 +48,5 @@ for row in nirjas["train"]:
 # Label distribution verification
 train_labels = nirjas["train"]["label"]
 print("Label distribution (train):")
-print(f"  license_related (1):     {sum(1 for l in train_labels if l == 1):,}")
-print(f"  not_license_related (0): {sum(1 for l in train_labels if l == 0):,}")
+print(f"  license_related (1):     {sum(1 for lbl in train_labels if lbl == 1):,}")
+print(f"  not_license_related (0): {sum(1 for lbl in train_labels if lbl == 0):,}")

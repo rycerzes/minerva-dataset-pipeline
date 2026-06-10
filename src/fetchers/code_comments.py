@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sys
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -21,23 +20,21 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Regex patterns for extracting comment-length spans
-# ---------------------------------------------------------------------------
 
 COMMENT_PATTERNS: dict[str, list[str]] = {
     "single_line": [
-        r"(?m)^[ \t]*(#[^!\n][^\n]*)",          # Python/Shell (exclude shebangs)
-        r"(?m)^[ \t]*(//(?!/).+)",               # C-style single line
-        r"(?m)^[ \t]*(--\s+.+)",                 # SQL
+        r"(?m)^[ \t]*(#[^!\n][^\n]*)",  # Python/Shell (exclude shebangs)
+        r"(?m)^[ \t]*(//(?!/).+)",  # C-style single line
+        r"(?m)^[ \t]*(--\s+.+)",  # SQL
     ],
     "docstring": [
-        r'"""(.+?)"""',                            # Python triple-quoted (non-greedy)
+        r'"""(.+?)"""',  # Python triple-quoted (non-greedy)
         r"'''(.+?)'''",
-        r"/\*\*(.+?)\*/",                          # JSDoc
+        r"/\*\*(.+?)\*/",  # JSDoc
     ],
     "inline": [
-        r"[^:\"'\n]\s(#\s[A-Z].{10,80})",        # Capitalised inline comment
+        r"[^:\"'\n]\s(#\s[A-Z].{10,80})",  # Capitalised inline comment
     ],
 }
 
@@ -88,9 +85,7 @@ _DEFAULT_LANGUAGES = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Data model
-# ---------------------------------------------------------------------------
 
 
 class CodeCommentSample(BaseModel):
@@ -102,9 +97,7 @@ class CodeCommentSample(BaseModel):
     comment_type: str  # "single_line" | "docstring" | "inline"
 
 
-# ---------------------------------------------------------------------------
 # Helper — .env reader (mirrors config._parse_env_file without importing it)
-# ---------------------------------------------------------------------------
 
 
 def _read_hf_token(env_path: Optional[Path] = None) -> Optional[str]:
@@ -124,9 +117,7 @@ def _read_hf_token(env_path: Optional[Path] = None) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Comment extraction
-# ---------------------------------------------------------------------------
 
 
 def _extract_comments(
@@ -160,9 +151,7 @@ def _is_license_adjacent(text: str) -> bool:
     return any(kw in lower for kw in LICENSE_KEYWORDS)
 
 
-# ---------------------------------------------------------------------------
 # Fetcher
-# ---------------------------------------------------------------------------
 
 
 class CodeCommentFetcher:
@@ -204,13 +193,9 @@ class CodeCommentFetcher:
         if self._token:
             logger.debug("HF_API_TOKEN loaded from .env")
         else:
-            logger.warning(
-                "HF_API_TOKEN not found — dataset access may be restricted"
-            )
+            logger.warning("HF_API_TOKEN not found — dataset access may be restricted")
 
-    # ------------------------------------------------------------------
     # Cache helpers
-    # ------------------------------------------------------------------
 
     def _cache_path(self) -> Optional[Path]:
         if self._cache_dir is None:
@@ -235,9 +220,7 @@ class CodeCommentFetcher:
             json.dump([s.model_dump() for s in samples], fh, indent=2)
         logger.info("Cached %d code comments → %s", len(samples), path)
 
-    # ------------------------------------------------------------------
     # Main public API
-    # ------------------------------------------------------------------
 
     def fetch(self, max_samples: int = 25_000) -> list[CodeCommentSample]:
         """Return up to *max_samples* clean non-license code comments.

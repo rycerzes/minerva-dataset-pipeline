@@ -12,15 +12,13 @@ logger = logging.getLogger(__name__)
 
 try:
     from ..config import LLMConfig, RateLimiter
+    from .llm_cache import LLMCache
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from config import LLMConfig, RateLimiter
+    from augmentation.llm_cache import LLMCache
 
-from .llm_cache import LLMCache
-
-# ---------------------------------------------------------------------------
 # Section markers used in the combined prompt / response
-# ---------------------------------------------------------------------------
 _SECTION_MARKERS = {
     "license_discussion": "=== LICENSE_DISCUSSION ===",
     "todo_fixme": "=== TODO_FIXME ===",
@@ -82,9 +80,7 @@ class HardNegativeGenerator:
         self._llm_client = None
         self._cache = cache
 
-    # ------------------------------------------------------------------
     # LLM client
-    # ------------------------------------------------------------------
 
     def _get_llm_client(self):
         import litellm
@@ -93,9 +89,7 @@ class HardNegativeGenerator:
         self._llm_client = litellm
         return self._llm_client
 
-    # ------------------------------------------------------------------
     # Combined prompt (Option 1: 4 calls → 1)
-    # ------------------------------------------------------------------
 
     def _build_combined_prompt(
         self, license_key: str, context: Optional[str] = None
@@ -129,9 +123,7 @@ Questions about ownership, updating years, adding contributors.
 Do NOT write actual license text — only discussions. Mix comment styles."""
         return prompt
 
-    # ------------------------------------------------------------------
     # Response parsing
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _parse_combined_response(
@@ -184,9 +176,7 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
 
         return results
 
-    # ------------------------------------------------------------------
     # LLM call with retries
-    # ------------------------------------------------------------------
 
     def _call_llm(self, prompt: str) -> str:
         """Call the LLM and return the raw response text."""
@@ -215,7 +205,7 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
             except Exception as e:
                 last_error = e
                 if attempt < self.MAX_RETRIES:
-                    wait = self.RETRY_BACKOFF_BASE ** attempt
+                    wait = self.RETRY_BACKOFF_BASE**attempt
                     logger.warning(
                         "LLM call failed (attempt %d/%d), retrying in %.1fs: %s",
                         attempt,
@@ -229,9 +219,7 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
             f"LLM API call failed after {self.MAX_RETRIES} attempts: {last_error}"
         ) from last_error
 
-    # ------------------------------------------------------------------
     # Per-license generation (combined prompt + cache)
-    # ------------------------------------------------------------------
 
     def generate_for_license(
         self, license_key: str, context: Optional[str] = None
@@ -277,49 +265,38 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
 
         return trimmed
 
-    # ------------------------------------------------------------------
     # Legacy single-category helpers (backward compat for tests)
-    # ------------------------------------------------------------------
 
     def generate_license_discussion(
         self, license_key: str, context: Optional[str] = None
     ) -> list[HardNegativeSample]:
         prompt = self._build_combined_prompt(license_key, context)
         raw = self._call_llm(prompt)
-        all_samples = self._parse_combined_response(
-            raw, license_key, self.config.model
-        )
+        all_samples = self._parse_combined_response(raw, license_key, self.config.model)
         return [s for s in all_samples if s.negative_type == "license_discussion"]
 
     def generate_todo_fixme(self, license_key: str) -> list[HardNegativeSample]:
         prompt = self._build_combined_prompt(license_key)
         raw = self._call_llm(prompt)
-        all_samples = self._parse_combined_response(
-            raw, license_key, self.config.model
-        )
+        all_samples = self._parse_combined_response(raw, license_key, self.config.model)
         return [s for s in all_samples if s.negative_type == "todo_fixme"]
 
     def generate_commented_code(self, license_key: str) -> list[HardNegativeSample]:
         prompt = self._build_combined_prompt(license_key)
         raw = self._call_llm(prompt)
-        all_samples = self._parse_combined_response(
-            raw, license_key, self.config.model
-        )
+        all_samples = self._parse_combined_response(raw, license_key, self.config.model)
         return [s for s in all_samples if s.negative_type == "commented_code"]
 
     def generate_copyright_discussion(
-        self, license_key: str,
+        self,
+        license_key: str,
     ) -> list[HardNegativeSample]:
         prompt = self._build_combined_prompt(license_key)
         raw = self._call_llm(prompt)
-        all_samples = self._parse_combined_response(
-            raw, license_key, self.config.model
-        )
+        all_samples = self._parse_combined_response(raw, license_key, self.config.model)
         return [s for s in all_samples if s.negative_type == "copyright_discussion"]
 
-    # ------------------------------------------------------------------
     # Batch generation
-    # ------------------------------------------------------------------
 
     def generate_batch(
         self,
@@ -341,9 +318,8 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
         results: list[HardNegativeSample] = []
 
         for i, license_key in enumerate(keys, 1):
-            is_cached = (
-                self._cache is not None
-                and self._cache.has(self.CACHE_NAMESPACE, license_key)
+            is_cached = self._cache is not None and self._cache.has(
+                self.CACHE_NAMESPACE, license_key
             )
             if i % 50 == 1 or i == total:
                 tag = " (cached)" if is_cached else ""
@@ -352,9 +328,7 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
 
         return results
 
-    # ------------------------------------------------------------------
     # Statistics
-    # ------------------------------------------------------------------
 
     def get_statistics(self, samples: list[HardNegativeSample]) -> dict:
         if not samples:
@@ -381,9 +355,7 @@ Do NOT write actual license text — only discussions. Mix comment styles."""
         return stats
 
 
-# ---------------------------------------------------------------------------
 # Module-level convenience function
-# ---------------------------------------------------------------------------
 
 
 def generate_hard_negatives(

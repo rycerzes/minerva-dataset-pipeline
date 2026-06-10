@@ -24,7 +24,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 try:
-    from .hybrid_merge import DatasetEntry, DataSource
+    from .hybrid_merge import DatasetEntry
     from ..augmentation.legal_structure_splitter import SplitFragment
     from ..augmentation.llm_synthetic import AugmentedFragment
     from ..augmentation.hard_negative_generator import HardNegativeSample
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover — direct-script execution
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from builder.hybrid_merge import DatasetEntry, DataSource
+    from builder.hybrid_merge import DatasetEntry
     from augmentation.legal_structure_splitter import SplitFragment
     from augmentation.llm_synthetic import AugmentedFragment
     from augmentation.hard_negative_generator import HardNegativeSample
@@ -202,7 +202,10 @@ class AugmentedMerger:
 
         # Step 1: apply hard cap
         for key, samples in by_key.items():
-            if cfg.max_samples_per_class is not None and len(samples) > cfg.max_samples_per_class:
+            if (
+                cfg.max_samples_per_class is not None
+                and len(samples) > cfg.max_samples_per_class
+            ):
                 pool[key] = self._rng.sample(samples, cfg.max_samples_per_class)
             else:
                 pool[key] = list(samples)
@@ -427,9 +430,7 @@ class AugmentedMerger:
         for s in samples:
             by_source[s.source] = by_source.get(s.source, 0) + 1
             if s.negative_type:
-                by_neg_type[s.negative_type] = (
-                    by_neg_type.get(s.negative_type, 0) + 1
-                )
+                by_neg_type[s.negative_type] = by_neg_type.get(s.negative_type, 0) + 1
 
         return {
             "total": len(samples),

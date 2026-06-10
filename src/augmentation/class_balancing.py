@@ -31,6 +31,7 @@ try:
 except ImportError:
     # Allow direct / standalone execution
     import sys as _sys
+
     _sys.path.insert(0, str(Path(__file__).parent.parent))
     from fetchers.code_comments import CodeCommentSample  # type: ignore[no-redef]
 
@@ -85,7 +86,6 @@ class BalancingConfig(BaseModel):
     )
 
 
-
 def _truncate_fragment(text: str, rng: random.Random) -> str:
     """Return a truncated or corrupted version of a license fragment.
 
@@ -119,8 +119,6 @@ def _truncate_fragment(text: str, rng: random.Random) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-
-
 class NirjasClassBalancer:
     """Assemble and balance a 2-class dataset for Nirjas training.
 
@@ -141,7 +139,6 @@ class NirjasClassBalancer:
     def __init__(self, config: Optional[BalancingConfig] = None):
         self.config = config or BalancingConfig()
         self._rng = random.Random(self.config.random_seed)
-
 
     def _build_license_related_pool(
         self,
@@ -237,7 +234,7 @@ class NirjasClassBalancer:
             )
 
         # 2b. Real code comments extracted from public source repositories
-        for comment in (code_comments or []):
+        for comment in code_comments or []:
             text = comment.text.strip()
             if not text or text in seen_texts:
                 continue
@@ -249,12 +246,14 @@ class NirjasClassBalancer:
                     source="code_corpus",
                     negative_type="generic_code_comment",
                     generation_method="extracted",
-                    metadata={"language": comment.language, "comment_type": comment.comment_type},
+                    metadata={
+                        "language": comment.language,
+                        "comment_type": comment.comment_type,
+                    },
                 )
             )
 
         return pool
-
 
     @staticmethod
     def _downsample(
@@ -321,7 +320,6 @@ class NirjasClassBalancer:
         self._rng.shuffle(combined)
         return combined
 
-
     def balance(
         self,
         fragments: Optional[list[SplitFragment]] = None,
@@ -352,7 +350,9 @@ class NirjasClassBalancer:
         hard_negatives = hard_negatives or []
 
         license_pool = self._build_license_related_pool(fragments, augmented)
-        non_license_pool = self._build_not_license_related_pool(hard_negatives, code_comments)
+        non_license_pool = self._build_not_license_related_pool(
+            hard_negatives, code_comments
+        )
 
         logger.info(
             "Pre-balance pool sizes — license_related: %d, not_license_related: %d",
@@ -433,6 +433,7 @@ class NirjasClassBalancer:
             for ntype, count in sorted(stats["by_negative_type"].items()):
                 print(f"  {ntype:25s} {count:,}")
         print("=" * 60)
+
 
 def balance_nirjas_dataset(
     fragments: Optional[list[SplitFragment]] = None,

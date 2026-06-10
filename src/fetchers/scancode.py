@@ -81,9 +81,7 @@ class ScanCodeFetcher:
         limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
         self._client = httpx.Client(timeout=60.0, limits=limits)
 
-    # ------------------------------------------------------------------
     # Cache helpers
-    # ------------------------------------------------------------------
 
     def _cache_path(self) -> Optional[Path]:
         if self._cache_dir is None:
@@ -146,7 +144,8 @@ class ScanCodeFetcher:
         if cached is not None:
             # Apply the same filters the caller requested
             filtered = [
-                lic for lic in cached
+                lic
+                for lic in cached
                 if (include_exceptions or not lic.is_exception)
                 and (include_deprecated or not lic.is_deprecated)
             ]
@@ -184,7 +183,8 @@ class ScanCodeFetcher:
 
         # Apply caller's filters
         filtered = [
-            lic for lic in all_licenses
+            lic
+            for lic in all_licenses
             if (include_exceptions or not lic.is_exception)
             and (include_deprecated or not lic.is_deprecated)
         ]

@@ -44,9 +44,7 @@ except ImportError:  # pragma: no cover — direct-script execution
     from augmentation.llm_cache import LLMCache
 
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 
 
 class RareLicenseAugmenterConfig(BaseModel):
@@ -58,8 +56,7 @@ class RareLicenseAugmenterConfig(BaseModel):
         default=5,
         ge=1,
         description=(
-            "Augment licenses whose sliding-window fragment count is below "
-            "this value."
+            "Augment licenses whose sliding-window fragment count is below this value."
         ),
     )
     augment_count: int = Field(
@@ -94,11 +91,18 @@ class RareLicenseAugmenterConfig(BaseModel):
             "prompt.  Very long licenses are truncated to this limit."
         ),
     )
+    max_tokens: int = Field(
+        default=4096,
+        ge=256,
+        description=(
+            "Max tokens for the LLM response.  Each variant can be up to "
+            "~800 tokens, so the default of 4096 comfortably fits 5 variants. "
+            "Overrides the global LLMConfig.max_tokens for this stage only."
+        ),
+    )
 
 
-# ---------------------------------------------------------------------------
 # Similarity helper
-# ---------------------------------------------------------------------------
 
 _VARIANT_SEP = "---VARIANT---"
 
@@ -117,9 +121,7 @@ def _jaccard_ngram(a: str, b: str, n: int = 3) -> float:
     return len(sa & sb) / union if union > 0 else 0.0
 
 
-# ---------------------------------------------------------------------------
 # Augmenter
-# ---------------------------------------------------------------------------
 
 
 class RareLicenseAugmenter:
@@ -152,9 +154,7 @@ class RareLicenseAugmenter:
         self._llm_client = None
         self._cache = cache
 
-    # ------------------------------------------------------------------
     # LLM helpers
-    # ------------------------------------------------------------------
 
     def _get_llm_client(self):
         if self._llm_client is None:
@@ -194,8 +194,11 @@ class RareLicenseAugmenter:
                 resp = llm.completion(
                     model=self._llm_config.model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=self._llm_config.max_tokens,
+                    max_tokens=self.config.max_tokens,
                     temperature=0.7,
+                    api_base=self._llm_config.api_base_url,
+                    api_key=self._llm_config.api_key,
+                    custom_llm_provider="openai",
                 )
                 return resp.choices[0].message.content or ""
             except Exception as exc:  # noqa: BLE001
@@ -221,9 +224,7 @@ class RareLicenseAugmenter:
         parts = raw.split(_VARIANT_SEP)
         return [p.strip() for p in parts if len(p.strip()) >= 50]
 
-    # ------------------------------------------------------------------
     # Per-license augmentation
-    # ------------------------------------------------------------------
 
     def _augment_one(
         self,
@@ -287,9 +288,7 @@ class RareLicenseAugmenter:
             )
         return result, False
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
 
     def augment(
         self,
@@ -315,15 +314,11 @@ class RareLicenseAugmenter:
         """
         threshold = self.config.threshold
 
-        frag_counts: Counter[str] = Counter(
-            f.license_key for f in existing_fragments
-        )
+        frag_counts: Counter[str] = Counter(f.license_key for f in existing_fragments)
         by_key: dict[str, DatasetEntry] = {
             e.license_key: e for e in base_dataset if e.license_text
         }
-        rare_keys = [
-            key for key in by_key if frag_counts.get(key, 0) < threshold
-        ]
+        rare_keys = [key for key in by_key if frag_counts.get(key, 0) < threshold]
 
         if not rare_keys:
             logger.info(

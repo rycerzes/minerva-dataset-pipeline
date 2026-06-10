@@ -50,16 +50,12 @@ class LLMCache:
         self._hits = 0
         self._misses = 0
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     def _key_path(self, namespace: str, key: str) -> Path:
         return self.cache_dir / namespace / f"{_safe_filename(key)}.json"
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
 
     def get(self, namespace: str, key: str) -> Optional[Any]:
         """Return cached value or ``None`` on miss."""

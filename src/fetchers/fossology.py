@@ -56,9 +56,7 @@ class FossologyFetcher:
         self._licenses: Optional[list[FossologyLicense]] = None
         self._cache_dir = Path(cache_dir) if cache_dir else None
 
-    # ------------------------------------------------------------------
     # Cache helpers
-    # ------------------------------------------------------------------
 
     def _cache_path(self) -> Optional[Path]:
         if self._cache_dir is None:
