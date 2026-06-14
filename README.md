@@ -59,16 +59,38 @@ Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
 uv sync
 ```
 
-For LLM-dependent stages, copy `.env.example` to `.env` and fill in:
+For LLM-dependent stages, copy `.env.example` to `.env` and fill in.
 
-```
-LITELLM_API_BASE_URL=...
-LITELLM_API_KEY=...
-LITELLM_MODEL=...
-LITELLM_TEMPERATURE=0.7
-LITELLM_MAX_TOKENS=4096
-LITELLM_RPM=60
-```
+### Required — LLM provider
+
+The model prefix follows LiteLLM convention: `provider/model-name`
+(e.g. `openai/gpt-4o`, `anthropic/claude-3-haiku`, `groq/llama-3.1-70b`).
+
+| Variable | Description |
+|---|---|
+| `LITELLM_API_BASE_URL` | LLM provider base URL |
+| `LITELLM_API_KEY` | API key or token |
+| `LITELLM_MODEL` | Model identifier with provider prefix |
+| `LITELLM_TEMPERATURE` | Sampling temperature (default: 0.7) |
+| `LITELLM_MAX_TOKENS` | Max tokens per response (default: 4096) |
+| `LITELLM_RPM` | Rate limit, requests per minute (default: 60) |
+
+### Optional — HuggingFace code comments
+
+`HF_API_TOKEN` — needed only for fetching real code comments from
+[bigcode/the-stack-smol](https://huggingface.co/datasets/bigcode/the-stack-smol).
+The dataset is public, so small fetches usually work without a token.
+Generate one at https://huggingface.co/settings/tokens.
+
+These LLM stages use the provider config:
+
+| Stage | What it does |
+|---|---|
+| **Surgical LLM injection** | Fills placeholder variables in fragments with realistic entities |
+| **Rare-license augmentation** | Paraphrases licenses with too few fragments |
+| **Hard negative generation** | Generates license-like text for the Nirjas negative class |
+
+Run with `--no-llm` to skip all LLM-dependent stages.
 
 ## Usage
 

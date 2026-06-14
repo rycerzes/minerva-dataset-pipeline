@@ -222,4 +222,4 @@ docs/
 tests/
 
 cache/
-output/
+output*/
