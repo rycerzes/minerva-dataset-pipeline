@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 from collections import defaultdict
 from typing import Optional
 
@@ -43,6 +44,71 @@ except ImportError:  # pragma: no cover — direct-script execution
     from utils import dedup_near_duplicates
 
 logger = logging.getLogger(__name__)
+
+
+def clean_synthetic_text(text: str) -> str:
+    """Remove common LLM/Markdown wrappers from synthetic license text.
+
+    The synthetic generators occasionally return Markdown-formatted answers
+    rather than plain license text: fenced blocks, bold headings, ``VARIANT``
+    labels, and preambles such as "Here are 10 variants".  Keep the legal text
+    itself, but strip presentation artifacts before adding synthetic samples to
+    Atarashi.
+    """
+    text = text.strip()
+
+    # Remove fenced-code markers while preserving their contents.
+    text = re.sub(r"```(?:[A-Za-z0-9_+-]+)?", "", text)
+
+    # Drop answer preambles and variant wrapper lines before generic Markdown
+    # stripping, otherwise e.g. **VARIANT---** can become VARIANT--- and remain.
+    text = re.sub(r"(?im)^\s*here (?:are|is) .*variants?.*$", "", text)
+    text = re.sub(r"(?im)^\s*(?:reformatted\s+)?variant\b\s*[-#:]?\s*\d*\s*:?-*\s*$", "", text)
+    text = re.sub(r"(?im)^\s*-{0,3}\s*variant\b\s*[-#: ]*\s*\d*\s*:?-{0,3}\s*$", "", text)
+    text = re.sub(r"(?im)^\s*\*{0,2}\s*-{0,3}\s*variant\b\s*[-#: ]*\s*\d*\s*:?-{0,3}\s*\*{0,2}\s*$", "", text)
+
+    # Remove generated license labels; the actual label is stored separately.
+    text = re.sub(r"(?im)^\s*\*{0,2}\s*\[?\s*license\s*:[^\n]*\]?\s*\*{0,2}\s*$", "", text)
+
+    # Remove Markdown heading markers and emphasis markers, preserving content.
+    text = re.sub(r"(?im)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", text)
+
+    # Remove C/Javadoc-style wrappers commonly introduced around synthetic snippets.
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"/\*+/?|\*+/|/\*+/", stripped):
+            continue
+        if re.fullmatch(r"\*{1,3}", stripped):
+            continue
+        line = re.sub(r"^\s*\*\s?", "", line)
+        line = re.sub(r"^\s*\*{2,}/\*\s*", "", line)
+        cleaned_lines.append(line)
+    text = "\n".join(cleaned_lines)
+
+    # Remove leftover standalone Markdown stars, but preserve C comment delimiters.
+    text = re.sub(r"(?m)^\s*\*{2,3}\s*$", "", text)
+    text = re.sub(r"(?<!/)\*{2,3}(?!/)", "", text)
+
+    # Remove horizontal rules, decorative ruler lines, and Markdown table rules.
+    text = re.sub(r"(?m)^[ \t]*[-=_]{3,}[ \t]*$", "", text)
+    text = re.sub(r"(?m)^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(?:\|[ \t]*:?-{2,}:?[ \t]*)+\|?[ \t]*$", "", text)
+    text = re.sub(r"(?m)^[ \t]*\|(.+)\|[ \t]*$", lambda m: m.group(1).replace("|", " "), text)
+
+    # Normalize bullets lightly; keep list structure because licenses often use it.
+    text = re.sub(r"(?m)^\s*[•»]\s+", "- ", text)
+
+    # Remove a few emoji-style presentation markers commonly inserted by the LLM.
+    text = re.sub(r"[✅❌⚠️]", "", text)
+
+    # Collapse excess whitespace without destroying paragraph boundaries.
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
 
 
 class AtarashiSample(BaseModel):
@@ -147,6 +213,10 @@ class AugmentedMerger:
         # 2. Raw sliding-window fragments (source inherits from parent licence)
         for frag in fragments:
             text = frag.fragment_text.strip()
+            if frag.source == "synthetic":
+                text = clean_synthetic_text(text)
+                if len(text) < 100:
+                    continue
             if not text or text in seen[frag.license_key]:
                 continue
             seen[frag.license_key].add(text)
@@ -160,7 +230,9 @@ class AugmentedMerger:
 
         # 3. LLM-augmented fragments → marked as "synthetic"
         for aug in augmented_fragments:
-            text = aug.augmented_text.strip()
+            text = clean_synthetic_text(aug.augmented_text)
+            if len(text) < 100:
+                continue
             if not text or text in seen[aug.original_fragment.license_key]:
                 continue
             # Skip pass-through (no placeholders were actually filled)

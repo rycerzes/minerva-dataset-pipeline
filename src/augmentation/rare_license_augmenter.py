@@ -106,6 +106,16 @@ class RareLicenseAugmenterConfig(BaseModel):
 
 _VARIANT_SEP = "---VARIANT---"
 
+# Accept the exact requested separator plus common Markdown-decorated variants
+# observed in cached LLM responses, e.g. **VARIANT 1**, --- variant ---,
+# **VARIANT---**.  The pattern is intentionally line-anchored so occurrences
+# of the word "variant" in legal prose do not split the text.
+_VARIANT_SEPARATOR_RE = re.compile(
+    r"(?im)^\s*(?:[-*_`\s]*)?(?:variant)\b(?:\s*[-#:]*\s*\d+\s*:?)?(?:\s*[-*_`]*)?\s*$"
+)
+_VARIANT_PREAMBLE_RE = re.compile(r"(?im)^\s*here (?:are|is) .*variants?.*$")
+_LICENSE_LABEL_RE = re.compile(r"(?im)^\s*\*{0,2}\s*\[?\s*license\s*:[^\n]*\]?\s*\*{0,2}\s*$")
+
 
 def _jaccard_ngram(a: str, b: str, n: int = 3) -> float:
     """Return character *n*-gram Jaccard similarity between *a* and *b*."""
@@ -220,33 +230,65 @@ class RareLicenseAugmenter:
         return None
 
     def _parse_variants(self, raw: str) -> list[str]:
-        """Split raw LLM response on the variant separator."""
-        parts = raw.split(_VARIANT_SEP)
-        return [p.strip() for p in parts if len(p.strip()) >= 50]
+        """Split a raw LLM response into individual variant texts.
 
-    # Per-license augmentation
+        The prompt asks for a line containing exactly ``---VARIANT---``, but
+        models sometimes return Markdown headings such as ``**VARIANT 1**`` or
+        ``---`` followed by ``**VARIANT---**``.  Normalize those separators so a
+        single response containing 10 variants does not become one giant sample.
+        """
+        normalized = raw.replace(_VARIANT_SEP, "\nVARIANT\n")
+        normalized = _VARIANT_PREAMBLE_RE.sub("", normalized)
+        normalized = _LICENSE_LABEL_RE.sub("", normalized)
+        normalized = re.sub(r"```(?:[A-Za-z0-9_+-]+)?", "", normalized)
 
-    def _augment_one(
+        parts = _VARIANT_SEPARATOR_RE.split(normalized)
+        if len(parts) == 1:
+            # Fallback for cases like "---\n**VARIANT 1**" where a horizontal
+            # rule was emitted separately from the variant heading.
+            parts = re.split(
+                r"(?im)^\s*-{3,}\s*\n\s*\*{0,2}\s*variant\s*\d*\s*\*{0,2}\s*$",
+                normalized,
+            )
+
+        variants: list[str] = []
+        for part in parts:
+            text = part.strip()
+            text = _VARIANT_PREAMBLE_RE.sub("", text)
+            text = _LICENSE_LABEL_RE.sub("", text)
+            text = re.sub(r"(?m)^\s*[-=_]{3,}\s*$", "", text).strip()
+            if len(text) >= 50:
+                variants.append(text)
+        return variants
+
+    def _build_fragment(
+        self,
+        license_key: str,
+        variant: str,
+    ) -> SplitFragment:
+        """Create a synthetic SplitFragment from an accepted variant."""
+        return SplitFragment(
+            license_key=license_key,
+            fragment_text=variant,
+            start_position=0,
+            end_position=len(variant),
+            fragment_index=0,
+            total_fragments=1,
+            source="synthetic",
+            placeholders=[],
+            is_first=True,
+            is_last=True,
+        )
+
+    def _postprocess_variants(
         self,
         license_key: str,
         license_text: str,
-        source: str,
-    ) -> tuple[list[SplitFragment], bool]:
-        """Return ``(fragments, was_cache_hit)`` for a single license."""
-        if self._cache is not None:
-            cached = self._cache.get(self.CACHE_NAMESPACE, license_key)
-            if cached is not None:
-                return [SplitFragment(**item) for item in cached], True
-
-        prompt = self._build_prompt(license_key, license_text)
-        raw = self._call_llm(prompt)
-        if not raw:
-            return [], False
-
-        variants = self._parse_variants(raw)
+        variants: list[str],
+    ) -> list[SplitFragment]:
+        """Apply similarity filters and convert accepted variants to fragments."""
         cfg = self.config
         result: list[SplitFragment] = []
-
         for variant in variants:
             sim = _jaccard_ngram(license_text, variant)
             if sim < cfg.min_similarity:
@@ -265,20 +307,38 @@ class RareLicenseAugmenter:
                     cfg.max_similarity,
                 )
                 continue
-            result.append(
-                SplitFragment(
-                    license_key=license_key,
-                    fragment_text=variant,
-                    start_position=0,
-                    end_position=len(variant),
-                    fragment_index=0,
-                    total_fragments=1,
-                    source="synthetic",
-                    placeholders=[],
-                    is_first=True,
-                    is_last=True,
-                )
-            )
+            result.append(self._build_fragment(license_key, variant))
+        return result
+
+    # Per-license augmentation
+
+    def _augment_one(
+        self,
+        license_key: str,
+        license_text: str,
+        source: str,
+    ) -> tuple[list[SplitFragment], bool]:
+        """Return ``(fragments, was_cache_hit)`` for a single license."""
+        if self._cache is not None:
+            cached = self._cache.get(self.CACHE_NAMESPACE, license_key)
+            if cached is not None:
+                # Older cache entries may contain a whole multi-variant LLM
+                # response as one fragment.  Re-parse cached text in memory so
+                # expensive LLM calls do not need to be repeated.
+                cached_variants: list[str] = []
+                for item in cached:
+                    cached_variants.extend(self._parse_variants(item["fragment_text"]))
+                return self._postprocess_variants(
+                    license_key, license_text, cached_variants
+                ), True
+
+        prompt = self._build_prompt(license_key, license_text)
+        raw = self._call_llm(prompt)
+        if not raw:
+            return [], False
+
+        variants = self._parse_variants(raw)
+        result = self._postprocess_variants(license_key, license_text, variants)
 
         if self._cache is not None:
             self._cache.set(
@@ -348,7 +408,7 @@ class RareLicenseAugmenter:
                 cache_misses += 1
 
             accepted += len(frags)
-            rejected += self.config.augment_count - len(frags)
+            rejected += max(0, self.config.augment_count - len(frags))
             results.extend(frags)
 
             if i % 50 == 1 or i == len(rare_keys):

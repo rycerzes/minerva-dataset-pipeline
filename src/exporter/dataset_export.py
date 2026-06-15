@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -147,19 +149,54 @@ class DatasetExporter:
         self,
         samples: list[AtarashiSample],
     ) -> DatasetDict | Dataset:
-        """Build an HF ``DatasetDict`` (train/test) or single ``Dataset``."""
-        ds = Dataset.from_dict(
-            self._atarashi_to_dict(samples),
-            features=ATARASHI_FEATURES,
-        )
+        """Build an HF Atarashi DatasetDict with per-license splitting.
+
+        A global random split can place all samples for a rare ``license_key`` in
+        the test set.  For multi-class license identification that creates
+        impossible evaluation labels.  Split each license independently and keep
+        singleton classes in train only, ensuring every test label is seen in
+        train.
+        """
         if self.config.train_split_ratio >= 1.0:
+            ds = Dataset.from_dict(
+                self._atarashi_to_dict(samples),
+                features=ATARASHI_FEATURES,
+            )
             return DatasetDict({"train": ds})
 
-        split = ds.train_test_split(
-            test_size=1.0 - self.config.train_split_ratio,
-            seed=self.config.random_seed,
+        rng = random.Random(self.config.random_seed)
+        by_key: dict[str, list[AtarashiSample]] = defaultdict(list)
+        for sample in samples:
+            by_key[sample.license_key].append(sample)
+
+        train: list[AtarashiSample] = []
+        test: list[AtarashiSample] = []
+        test_ratio = 1.0 - self.config.train_split_ratio
+
+        for group in by_key.values():
+            group = list(group)
+            rng.shuffle(group)
+            if len(group) == 1 or test_ratio <= 0.0:
+                train.extend(group)
+                continue
+
+            n_test = max(1, round(len(group) * test_ratio))
+            n_test = min(n_test, len(group) - 1)  # leave at least one in train
+            test.extend(group[:n_test])
+            train.extend(group[n_test:])
+
+        rng.shuffle(train)
+        rng.shuffle(test)
+
+        train_ds = Dataset.from_dict(
+            self._atarashi_to_dict(train),
+            features=ATARASHI_FEATURES,
         )
-        return split
+        test_ds = Dataset.from_dict(
+            self._atarashi_to_dict(test),
+            features=ATARASHI_FEATURES,
+        )
+        return DatasetDict({"train": train_ds, "test": test_ds})
 
     # -- Nirjas -------------------------------------------------------------
 
