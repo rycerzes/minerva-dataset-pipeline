@@ -124,6 +124,7 @@ LLM responses are cached under `cache/` so re-runs only call the API for new lic
 | `--rare-license-augment-count` | `5` | LLM variants to generate per rare license |
 | `--hard-negative-limit` | _(none)_ | Max licenses to generate hard negatives for |
 | `--train-split-ratio` | `0.8` | Train fraction |
+| `--validation-split-ratio` | `0.1` | Validation fraction; remaining fraction is test |
 | `--no-llm` | `false` | Skip all LLM stages |
 
 ## Project structure

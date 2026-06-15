@@ -51,6 +51,7 @@ def run_pipeline(
     include_deprecated: bool = True,
     export_dir: str = "output",
     train_split_ratio: float = 0.8,
+    validation_split_ratio: float = 0.1,
     enable_llm: bool = True,
     verbose: bool = False,
     cache_dir: str = "cache",
@@ -246,6 +247,7 @@ def run_pipeline(
     export_config = ExportConfig(
         output_dir=export_dir,
         train_split_ratio=train_split_ratio,
+        validation_split_ratio=validation_split_ratio,
     )
     exporter = DatasetExporter(export_config)
     export_result = exporter.export(
@@ -324,6 +326,15 @@ def main():
         type=float,
         default=0.8,
         help="Fraction of data for the train split (default: 0.8)",
+    )
+    parser.add_argument(
+        "--validation-split-ratio",
+        type=float,
+        default=0.1,
+        help=(
+            "Fraction of data for the validation split (default: 0.1). "
+            "The remaining fraction goes to test."
+        ),
     )
     parser.add_argument(
         "--no-llm",
@@ -416,6 +427,7 @@ def main():
         include_deprecated=args.include_deprecated,
         export_dir=args.export_dir,
         train_split_ratio=args.train_split_ratio,
+        validation_split_ratio=args.validation_split_ratio,
         enable_llm=not args.no_llm,
         verbose=args.verbose,
         cache_dir=args.cache_dir,

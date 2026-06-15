@@ -68,10 +68,16 @@ class ExportConfig(BaseModel):
         default=0.8,
         ge=0.0,
         le=1.0,
+        description="Fraction of samples assigned to the 'train' split.",
+    )
+    validation_split_ratio: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
         description=(
-            "Fraction of samples assigned to the 'train' split.  "
-            "The remainder goes to 'test'.  Set to 1.0 to export a "
-            "single 'train' split only."
+            "Fraction of samples assigned to the 'validation' split. The "
+            "remaining fraction after train+validation goes to 'test'. Set to "
+            "0.0 for a train/test export."
         ),
     )
     random_seed: int = 42
@@ -93,9 +99,11 @@ class ExportResult(BaseModel):
     nirjas_path: Optional[str] = None
     atarashi_total: int = 0
     atarashi_train: int = 0
+    atarashi_validation: int = 0
     atarashi_test: int = 0
     nirjas_total: int = 0
     nirjas_train: int = 0
+    nirjas_validation: int = 0
     nirjas_test: int = 0
 
 
@@ -133,6 +141,18 @@ class DatasetExporter:
 
     def __init__(self, config: Optional[ExportConfig] = None):
         self.config = config or ExportConfig()
+        if self.config.train_split_ratio + self.config.validation_split_ratio > 1.0:
+            raise ValueError(
+                "train_split_ratio + validation_split_ratio must be <= 1.0"
+            )
+
+    @property
+    def _test_split_ratio(self) -> float:
+        """Fraction assigned to test after train and validation."""
+        return max(
+            0.0,
+            1.0 - self.config.train_split_ratio - self.config.validation_split_ratio,
+        )
 
     # -- Atarashi -----------------------------------------------------------
 
@@ -152,10 +172,10 @@ class DatasetExporter:
         """Build an HF Atarashi DatasetDict with per-license splitting.
 
         A global random split can place all samples for a rare ``license_key`` in
-        the test set.  For multi-class license identification that creates
-        impossible evaluation labels.  Split each license independently and keep
-        singleton classes in train only, ensuring every test label is seen in
-        train.
+        validation/test. For multi-class license identification that creates
+        impossible evaluation labels. Split each license independently and keep
+        singleton classes in train only, ensuring every validation/test label is
+        seen in train.
         """
         if self.config.train_split_ratio >= 1.0:
             ds = Dataset.from_dict(
@@ -170,33 +190,72 @@ class DatasetExporter:
             by_key[sample.license_key].append(sample)
 
         train: list[AtarashiSample] = []
+        validation: list[AtarashiSample] = []
         test: list[AtarashiSample] = []
-        test_ratio = 1.0 - self.config.train_split_ratio
+        val_ratio = self.config.validation_split_ratio
+        test_ratio = self._test_split_ratio
 
         for group in by_key.values():
             group = list(group)
             rng.shuffle(group)
-            if len(group) == 1 or test_ratio <= 0.0:
+            n = len(group)
+
+            if n == 1 or (val_ratio <= 0.0 and test_ratio <= 0.0):
                 train.extend(group)
                 continue
 
-            n_test = max(1, round(len(group) * test_ratio))
-            n_test = min(n_test, len(group) - 1)  # leave at least one in train
-            test.extend(group[:n_test])
-            train.extend(group[n_test:])
+            if n == 2:
+                # Keep the label learnable. Prefer a test example for the
+                # two-sample case; validation metrics should focus on labels
+                # with >=3 samples.
+                train.append(group[0])
+                if test_ratio > 0.0:
+                    test.append(group[1])
+                elif val_ratio > 0.0:
+                    validation.append(group[1])
+                else:
+                    train.append(group[1])
+                continue
+
+            n_val = max(1, round(n * val_ratio)) if val_ratio > 0.0 else 0
+            n_test = max(1, round(n * test_ratio)) if test_ratio > 0.0 else 0
+
+            # Always leave at least one training sample.
+            while n_val + n_test > n - 1:
+                if n_val >= n_test and n_val > 0:
+                    n_val -= 1
+                elif n_test > 0:
+                    n_test -= 1
+                else:
+                    break
+
+            validation.extend(group[:n_val])
+            test.extend(group[n_val : n_val + n_test])
+            train.extend(group[n_val + n_test :])
 
         rng.shuffle(train)
+        rng.shuffle(validation)
         rng.shuffle(test)
 
-        train_ds = Dataset.from_dict(
-            self._atarashi_to_dict(train),
-            features=ATARASHI_FEATURES,
+        result = DatasetDict(
+            {
+                "train": Dataset.from_dict(
+                    self._atarashi_to_dict(train),
+                    features=ATARASHI_FEATURES,
+                )
+            }
         )
-        test_ds = Dataset.from_dict(
-            self._atarashi_to_dict(test),
-            features=ATARASHI_FEATURES,
-        )
-        return DatasetDict({"train": train_ds, "test": test_ds})
+        if validation:
+            result["validation"] = Dataset.from_dict(
+                self._atarashi_to_dict(validation),
+                features=ATARASHI_FEATURES,
+            )
+        if test:
+            result["test"] = Dataset.from_dict(
+                self._atarashi_to_dict(test),
+                features=ATARASHI_FEATURES,
+            )
+        return result
 
     # -- Nirjas -------------------------------------------------------------
 
@@ -214,36 +273,90 @@ class DatasetExporter:
         self,
         samples: list[NirjasSample],
     ) -> DatasetDict | Dataset:
-        """Build an HF ``DatasetDict`` (train/test) or single ``Dataset``."""
-        ds = Dataset.from_dict(
-            self._nirjas_to_dict(samples),
-            features=NIRJAS_FEATURES,
-        )
+        """Build a stratified HF Nirjas DatasetDict.
+
+        Splits are stratified by binary label so validation/test preserve the
+        license-related vs non-license-related ratio.
+        """
         if self.config.train_split_ratio >= 1.0:
+            ds = Dataset.from_dict(
+                self._nirjas_to_dict(samples),
+                features=NIRJAS_FEATURES,
+            )
             return DatasetDict({"train": ds})
 
-        split = ds.train_test_split(
-            test_size=1.0 - self.config.train_split_ratio,
-            seed=self.config.random_seed,
-            stratify_by_column="label",
+        rng = random.Random(self.config.random_seed)
+        val_ratio = self.config.validation_split_ratio
+        test_ratio = self._test_split_ratio
+
+        by_label: dict[str, list[NirjasSample]] = defaultdict(list)
+        for sample in samples:
+            by_label[sample.label].append(sample)
+
+        train: list[NirjasSample] = []
+        validation: list[NirjasSample] = []
+        test: list[NirjasSample] = []
+
+        for group in by_label.values():
+            group = list(group)
+            rng.shuffle(group)
+            n = len(group)
+            if val_ratio <= 0.0 and test_ratio <= 0.0:
+                train.extend(group)
+                continue
+
+            n_val = round(n * val_ratio) if val_ratio > 0.0 else 0
+            n_test = round(n * test_ratio) if test_ratio > 0.0 else 0
+            if n_val + n_test > n:
+                overflow = n_val + n_test - n
+                n_test = max(0, n_test - overflow)
+
+            validation.extend(group[:n_val])
+            test.extend(group[n_val : n_val + n_test])
+            train.extend(group[n_val + n_test :])
+
+        rng.shuffle(train)
+        rng.shuffle(validation)
+        rng.shuffle(test)
+
+        result = DatasetDict(
+            {
+                "train": Dataset.from_dict(
+                    self._nirjas_to_dict(train),
+                    features=NIRJAS_FEATURES,
+                )
+            }
         )
-        return split
+        if validation:
+            result["validation"] = Dataset.from_dict(
+                self._nirjas_to_dict(validation),
+                features=NIRJAS_FEATURES,
+            )
+        if test:
+            result["test"] = Dataset.from_dict(
+                self._nirjas_to_dict(test),
+                features=NIRJAS_FEATURES,
+            )
+        return result
 
     # -- Statistics ---------------------------------------------------------
 
-    @staticmethod
-    def _atarashi_statistics(ds: DatasetDict) -> dict:
+    def _atarashi_statistics(self, ds: DatasetDict) -> dict:
         """Compute summary statistics for the Atarashi export."""
+        train_keys = set(ds["train"]["license_key"]) if "train" in ds else set()
         stats: dict = {"splits": {}}
         total = 0
         all_keys: set[str] = set()
         source_counts: dict[str, int] = {}
+        class_counts: dict[str, int] = {}
 
         for split_name, split_ds in ds.items():
             n = len(split_ds)
             total += n
             keys = set(split_ds["license_key"])
             all_keys.update(keys)
+            for key in split_ds["license_key"]:
+                class_counts[key] = class_counts.get(key, 0) + 1
             split_sources: dict[str, int] = {}
             for src in split_ds["source"]:
                 split_sources[src] = split_sources.get(src, 0) + 1
@@ -252,15 +365,32 @@ class DatasetExporter:
                 "samples": n,
                 "unique_licenses": len(keys),
                 "by_source": split_sources,
+                "labels_not_in_train": len(keys - train_keys)
+                if split_name != "train"
+                else 0,
             }
 
+        stats["split_policy"] = {
+            "train_ratio": self.config.train_split_ratio,
+            "validation_ratio": self.config.validation_split_ratio,
+            "test_ratio": self._test_split_ratio,
+            "per_license": True,
+            "singleton_labels": "train_only",
+            "two_sample_labels": "train_plus_test_when_test_split_exists",
+        }
         stats["total_samples"] = total
         stats["total_unique_licenses"] = len(all_keys)
         stats["by_source"] = source_counts
+        stats["classes_with_1_sample"] = sum(1 for v in class_counts.values() if v == 1)
+        stats["classes_with_le_3_samples"] = sum(
+            1 for v in class_counts.values() if v <= 3
+        )
+        stats["classes_with_le_5_samples"] = sum(
+            1 for v in class_counts.values() if v <= 5
+        )
         return stats
 
-    @staticmethod
-    def _nirjas_statistics(ds: DatasetDict) -> dict:
+    def _nirjas_statistics(self, ds: DatasetDict) -> dict:
         """Compute summary statistics for the Nirjas export."""
         stats: dict = {"splits": {}}
         total = 0
@@ -298,6 +428,12 @@ class DatasetExporter:
                 "by_negative_type": split_neg,
             }
 
+        stats["split_policy"] = {
+            "train_ratio": self.config.train_split_ratio,
+            "validation_ratio": self.config.validation_split_ratio,
+            "test_ratio": self._test_split_ratio,
+            "stratify_by": "label",
+        }
         stats["total_samples"] = total
         stats["by_label"] = label_counts
         stats["by_source"] = source_counts
@@ -339,6 +475,7 @@ class DatasetExporter:
             result.atarashi_path = str(atarashi_path)
             result.atarashi_total = len(atarashi_samples)
             result.atarashi_train = len(ds_dict.get("train", []))
+            result.atarashi_validation = len(ds_dict.get("validation", []))
             result.atarashi_test = len(ds_dict.get("test", []))
 
             if self.config.write_statistics:
@@ -349,9 +486,10 @@ class DatasetExporter:
                 logger.info("Atarashi statistics written to %s", stats_path)
 
             logger.info(
-                "Atarashi dataset exported: %d total (%d train / %d test) → %s",
+                "Atarashi dataset exported: %d total (%d train / %d validation / %d test) → %s",
                 result.atarashi_total,
                 result.atarashi_train,
+                result.atarashi_validation,
                 result.atarashi_test,
                 atarashi_path,
             )
@@ -366,6 +504,7 @@ class DatasetExporter:
             result.nirjas_path = str(nirjas_path)
             result.nirjas_total = len(nirjas_samples)
             result.nirjas_train = len(ds_dict.get("train", []))
+            result.nirjas_validation = len(ds_dict.get("validation", []))
             result.nirjas_test = len(ds_dict.get("test", []))
 
             if self.config.write_statistics:
@@ -376,9 +515,10 @@ class DatasetExporter:
                 logger.info("Nirjas statistics written to %s", stats_path)
 
             logger.info(
-                "Nirjas dataset exported: %d total (%d train / %d test) → %s",
+                "Nirjas dataset exported: %d total (%d train / %d validation / %d test) → %s",
                 result.nirjas_total,
                 result.nirjas_train,
+                result.nirjas_validation,
                 result.nirjas_test,
                 nirjas_path,
             )
@@ -395,8 +535,9 @@ class DatasetExporter:
             print("\n--- Atarashi (licence similarity) ---")
             print(f"  Path:           {result.atarashi_path}")
             print(f"  Total samples:  {result.atarashi_total:,}")
-            print(f"  Train split:    {result.atarashi_train:,}")
-            print(f"  Test split:     {result.atarashi_test:,}")
+            print(f"  Train split:      {result.atarashi_train:,}")
+            print(f"  Validation split: {result.atarashi_validation:,}")
+            print(f"  Test split:       {result.atarashi_test:,}")
         else:
             print("\n  Atarashi: (not exported)")
 
@@ -404,8 +545,9 @@ class DatasetExporter:
             print("\n--- Nirjas (2-class classification) ---")
             print(f"  Path:           {result.nirjas_path}")
             print(f"  Total samples:  {result.nirjas_total:,}")
-            print(f"  Train split:    {result.nirjas_train:,}")
-            print(f"  Test split:     {result.nirjas_test:,}")
+            print(f"  Train split:      {result.nirjas_train:,}")
+            print(f"  Validation split: {result.nirjas_validation:,}")
+            print(f"  Test split:       {result.nirjas_test:,}")
         else:
             print("\n  Nirjas: (not exported)")
 
@@ -420,6 +562,7 @@ def export_datasets(
     nirjas_samples: Optional[list[NirjasSample]] = None,
     output_dir: str = "output",
     train_split_ratio: float = 0.8,
+    validation_split_ratio: float = 0.1,
     random_seed: int = 42,
     write_statistics: bool = True,
 ) -> ExportResult:
@@ -430,6 +573,7 @@ def export_datasets(
     config = ExportConfig(
         output_dir=output_dir,
         train_split_ratio=train_split_ratio,
+        validation_split_ratio=validation_split_ratio,
         random_seed=random_seed,
         write_statistics=write_statistics,
     )
